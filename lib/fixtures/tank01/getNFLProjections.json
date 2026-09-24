@@ -1,0 +1,136 @@
+{
+  "statusCode": 200,
+  "body": {
+    "playerProjections": {
+      "4430807": {
+        "playerID": "4430807",
+        "longName": "Caleb Williams",
+        "team": "CHI",
+        "teamID": "6",
+        "pos": "QB",
+        "opponent": "MIN",
+        "fantasyPoints": "19.4",
+        "Passing": {
+          "passAttempts": "33.1",
+          "passYds": "248.6",
+          "passTD": "1.6",
+          "int": "0.7"
+        },
+        "Rushing": {
+          "carries": "3.8",
+          "rushYds": "18.2",
+          "rushTD": "0.2"
+        }
+      },
+      "4262921": {
+        "playerID": "4262921",
+        "longName": "Justin Jefferson",
+        "team": "MIN",
+        "teamID": "18",
+        "pos": "WR",
+        "opponent": "CHI",
+        "fantasyPoints": "18.7",
+        "Receiving": {
+          "targets": "10.4",
+          "receptions": "6.8",
+          "recYds": "96.1",
+          "recTD": "0.6"
+        }
+      },
+      "4429795": {
+        "playerID": "4429795",
+        "longName": "Jahmyr Gibbs",
+        "team": "DET",
+        "teamID": "11",
+        "pos": "RB",
+        "opponent": "GB",
+        "fantasyPoints": "17.2",
+        "Rushing": {
+          "carries": "15.2",
+          "rushYds": "78.4",
+          "rushTD": "0.7"
+        },
+        "Receiving": {
+          "targets": "4.1",
+          "receptions": "3.2",
+          "recYds": "26.8",
+          "recTD": "0.2"
+        }
+      },
+      "4047365": {
+        "playerID": "4047365",
+        "longName": "Josh Jacobs",
+        "team": "GB",
+        "teamID": "12",
+        "pos": "RB",
+        "opponent": "DET",
+        "fantasyPoints": "15.9",
+        "Rushing": {
+          "carries": "17.8",
+          "rushYds": "81.2",
+          "rushTD": "0.8"
+        },
+        "Receiving": {
+          "targets": "3.0",
+          "receptions": "2.3",
+          "recYds": "17.4"
+        }
+      },
+      "17427": {
+        "playerID": "17427",
+        "longName": "Cairo Santos",
+        "team": "CHI",
+        "teamID": "6",
+        "pos": "PK",
+        "opponent": "MIN",
+        "fantasyPoints": "8.1",
+        "Kicking": {
+          "fgMade": "1.7",
+          "fgAttempts": "2.1",
+          "xpMade": "2.2"
+        }
+      },
+      "4374302": {
+        "playerID": "4374302",
+        "longName": "Amon-Ra St. Brown",
+        "team": "DET",
+        "teamID": "11",
+        "pos": "WR",
+        "opponent": "GB",
+        "fantasyPointsDefault": {
+          "standard": "12.1",
+          "halfPPR": "14.6",
+          "PPR": "17.1"
+        },
+        "Receiving": {
+          "targets": "9.6",
+          "receptions": "6.4",
+          "recYds": "78.2",
+          "recTD": "0.5"
+        }
+      }
+    },
+    "teamDefenseProjections": {
+      "CHI": {
+        "team": "CHI",
+        "teamID": "6",
+        "opponent": "MIN",
+        "fantasyPointsDefault": "7.4",
+        "defTD": "0.1",
+        "sacks": "2.4",
+        "int": "0.8",
+        "ptsAllowed": "21.3"
+      },
+      "MIN": {
+        "team": "MIN",
+        "teamID": "18",
+        "opponent": "CHI",
+        "fantasyPointsDefault": "8.2",
+        "defTD": "0.2",
+        "sacks": "2.8",
+        "int": "0.9",
+        "ptsAllowed": "19.6"
+      }
+    }
+  }
+}

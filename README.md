@@ -48,7 +48,14 @@ js/views/league.js      League Overview (season standings + roster composition)
 js/views/matchup.js     Matchup / Scoreboard hub
 js/views/team.js        Team Roster
 js/app.js               Boot, state restore, event wiring, control handlers
-supabase/migrations/    The three migrations applied to the database
+lib/services/sportsData.ts        Ingestion facade: the four sync methods
+lib/services/providers/           Provider registry + the Tank01 / RapidAPI fetcher
+lib/services/syncRepository.ts    Batched UPSERTs through the fsnv2_sync_* RPCs
+lib/services/{env,logger,httpClient,normalize,types}.ts   Config, logging, HTTP, mapping helpers
+lib/fixtures/tank01/    Recorded provider payloads (the `fixture` provider)
+scripts/sync-data.ts    Sync CLI (npm run sync:data)
+scripts/test-sync-data.ts  Sync verification CLI (npm run test:sync-data)
+supabase/migrations/    Schema + RPC migrations (0004 adds the sync tables)
 tests/engine.test.mjs   41 assertions: snake order, clock expiry, rosters, hydration
 tests/season.test.mjs   42 assertions: schedule, simulation, standings, hydration
 tests/draft-sim.test.mjs Full 15-round simulation + optional database round-trip
@@ -218,7 +225,8 @@ matchup rows, so every simulated week moves the table the moment it goes final.
 
 Applied to the Supabase project **FSN** as `fsnv2_draft_engine_schema`,
 `fsnv2_draft_engine_rpc` and `fsnv2_season_matchups` (checked in under
-`supabase/migrations/`). Tables live in a dedicated `fsnv2` schema so they
+`supabase/migrations/`). `0004_fsnv2_sports_data_sync.sql` adds the ingestion
+tables and RPCs — apply it before the first sync run. Tables live in a dedicated `fsnv2` schema so they
 never collide with the existing `public.*` tables.
 
 | Table | Columns |
@@ -229,6 +237,18 @@ never collide with the existing `public.*` tables.
 | `fsnv2.players` | `id`, `name`, `position`, `team`, `adp`, `stats` (jsonb), timestamps |
 | `fsnv2.matchups` | `id`, `league_id`, `week`, `team_a_id`, `team_b_id`, `team_a_score`, `team_b_score`, `status` |
 | `fsnv2.player_week_scores` | `id`, `league_id`, `week`, `team_id`, `player_id`, `slot`, `starter`, `projected`, `points` |
+| `fsnv2.nfl_teams` | `id`, `provider`, `external_id`, `abbr`, `city`, `name`, `conference`, `division`, `bye_week`, `logo_url`, `raw`, `synced_at` |
+| `fsnv2.projections` | `id`, `provider`, `external_player_id`, `player_id`, `season`, `week`, `season_type`, `scoring_format`, `fantasy_points`, `stats` (jsonb), `raw`, `synced_at` |
+| `fsnv2.weekly_stats` | `id`, `provider`, `external_player_id`, `player_id`, `season`, `week`, `game_external_id`, `team`, `opponent`, `fantasy_points`, `stats`, `snap_counts`, `synced_at` |
+| `fsnv2.nfl_matchups` | `id`, `provider`, `external_id`, `season`, `week`, `home_team`, `away_team`, `home_score`, `away_score`, `kickoff`, `status`, `venue` |
+| `fsnv2.sync_runs` | `id`, `task`, `provider`, `season`, `week`, `status`, `fetched`, `written`, `skipped`, `duration_ms`, `error`, `detail`, timestamps |
+
+Migration `0004` also extends `fsnv2.players` in place with `provider`,
+`external_id`, `nfl_team_external_id`, `jersey`, `status`, `injury`, `bye_week`,
+`age`, `experience`, `college` and `synced_at`, under a
+`unique (provider, external_id)`. The synthetic pool in `js/playerData.js` keeps
+its `p-0001` ids and null provider, so the draft board is untouched; synced rows
+sit beside them keyed `<provider>-<external_id>`.
 
 Constraints that keep a board honest: `unique (draft_id, pick_number)`,
 `unique (draft_id, player_id)`, and a FK from `draft_picks.player_id` to
@@ -256,6 +276,18 @@ security-definer RPCs in `public`:
 | `fsnv2_simulate_week(league, week, scores)` | stores a box score and re-sums the team totals |
 | `fsnv2_reset_season(league[, week])` | rolls a week — or the season — back to unplayed |
 | `fsnv2_matchups` / `fsnv2_season_standings` / `fsnv2_season_state` | reads |
+| `fsnv2_sync_nfl_teams` / `fsnv2_sync_players` | **upsert** franchises and rosters (service_role only) |
+| `fsnv2_sync_projections` / `fsnv2_sync_weekly_stats` / `fsnv2_sync_schedules` | **upsert** a week of projections, box scores, games |
+| `fsnv2_log_sync_run(...)` | one audit row per sync attempt |
+| `fsnv2_projections` / `fsnv2_weekly_stats` / `fsnv2_nfl_schedule` / `fsnv2_nfl_teams` | reads for the UI |
+| `fsnv2_sync_status(limit)` | row counts, freshness and the last sync attempts |
+
+Every `fsnv2_sync_*` function returns
+`{"inserted": n, "updated": n, "skipped": n, "total": n}` and conflicts on a
+unique key, so re-running a sync refreshes rows and never duplicates them. They
+are granted to **`service_role` only** — the sync service runs server-side with
+the secret key, and nothing in the browser can rewrite projections. The read
+RPCs stay open to `anon`/`authenticated` like the rest of the surface.
 
 `fsnv2_record_pick` re-derives the round and team from `pick_number` inside the
 transaction and raises on anything inconsistent, so a buggy client cannot write
@@ -292,6 +324,114 @@ editing the file:
 
 Set `supabase.enabled = false` to run fully offline on localStorage.
 
+## Background sports-data sync
+
+The draft board runs on the synthetic pool in `js/playerData.js`. The sync
+service replaces that with real NFL data — players, rosters, weekly projections,
+box scores and the schedule — on a schedule of its own, without the UI having to
+know where any of it came from.
+
+```
+lib/services/sportsData.ts          the facade: four methods, one result shape
+  └── providers/index.ts            registry — SPORTS_DATA_PROVIDER picks one
+        ├── tank01.ts               default fetcher (Tank01 / generic RapidAPI)
+        └── fixtureTransport.ts     the same mapper over recorded payloads
+  └── syncRepository.ts             batched UPSERTs -> public.fsnv2_sync_*
+```
+
+```js
+import { createSportsDataService } from './lib/services/sportsData.ts';
+
+const service = createSportsDataService();
+
+await service.syncPlayersAndRosters();     // fsnv2.nfl_teams + fsnv2.players
+await service.syncSchedules();             // fsnv2.nfl_matchups
+await service.syncWeeklyProjections(3);    // fsnv2.projections
+await service.syncBoxScores(3);            // fsnv2.weekly_stats
+```
+
+Every method resolves to the same `SyncResult`:
+
+```js
+{
+  task: 'weekly_projections', provider: 'tank01', ok: true,
+  season: 2026, week: 3,
+  fetched: 612, written: 612, inserted: 41, updated: 571, skipped: 0,
+  batches: 6, durationMs: 4182, errors: [], runId: '…', detail: { … }
+}
+```
+
+Expected failures — a provider 500, a rate limit, a rejected batch — come back as
+`ok: false` with `errors` filled in and an `error` row in `fsnv2.sync_runs`, so one
+bad task in a nightly run never aborts the others. Programmer errors (an unknown
+provider, a week outside 1-22, missing credentials) still throw.
+
+### Swapping providers
+
+`SPORTS_DATA_PROVIDER` is the only switch. A new vendor is one file implementing
+`SportsDataProvider` plus one `registerProvider()` call — no schema change, no
+RPC change, no UI change, because the provider's only job is to return the rows
+in `lib/services/types.ts`:
+
+```ts
+registerProvider('sportradar', ({ env, logger }) => createSportradarProvider({ env, logger }));
+```
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `SPORTS_DATA_PROVIDER` | `tank01` | `tank01` \| `fixture` \| anything registered |
+| `SPORTS_DATA_API_KEY` | — | sent as `x-rapidapi-key` |
+| `SPORTS_DATA_API_HOST` | — | sent as `x-rapidapi-host`, and the default base URL |
+| `SPORTS_DATA_BASE_URL` | `https://$HOST` | for a non-RapidAPI deployment |
+| `SPORTS_DATA_ENDPOINT_*` | Tank01 paths | `…_TEAMS`, `…_PLAYER_LIST`, `…_PROJECTIONS`, `…_GAMES`, `…_BOX_SCORE` |
+| `SPORTS_DATA_SEASON` | current season | Sep-Feb belongs to the earlier year |
+| `SPORTS_DATA_SCORING` | `ppr` | drives the provider's fantasy-point maths |
+| `SPORTS_DATA_BATCH_SIZE` | `120` | rows per upsert RPC call |
+| `SPORTS_DATA_MAX_RETRIES` | `3` | exponential backoff on 429/5xx/socket errors |
+| `SPORTS_DATA_RATE_LIMIT_MS` | `0` | minimum gap between provider calls |
+| `SPORTS_DATA_DRY_RUN` | `0` | fetch and map, write nothing |
+| `SUPABASE_SERVICE_ROLE_KEY` | — | the sync RPCs are granted to `service_role` only |
+
+`.env.example` carries the full list. The browser app is unaffected: it keeps its
+publishable key in `js/config.js` and reads through the `fsnv2_*` read RPCs.
+
+### Running a sync
+
+```bash
+npm run sync:data -- players                    # teams + rosters
+npm run sync:data -- schedules                  # the whole season's games
+npm run sync:data -- projections boxscores --week=3
+npm run sync:data -- all --week=3 --dry-run     # map everything, write nothing
+npm run sync:data -- all --week=3 --provider=fixture
+```
+
+Node 22+ runs the TypeScript directly (`--experimental-strip-types` is the
+default from 22.6), so the service keeps the project's no-build promise: no
+bundler, no `node_modules`, nothing to compile before a cron job can call it.
+
+### Mapping
+
+| Our table | Provider payload | Notes |
+| --- | --- | --- |
+| `fsnv2.nfl_teams` | `getNFLTeams` | bye week read out of `byeWeeks[season]` |
+| `fsnv2.players` | `getNFLTeams?rosters=true` | one call for players *and* their team; falls back to `getNFLPlayerList` |
+| `fsnv2.projections` | `getNFLProjections` | `playerProjections` + `teamDefenseProjections` (`DST-<ABBR>`) |
+| `fsnv2.weekly_stats` | `getNFLGamesForWeek` → `getNFLBoxScore` | per-game, opponent derived from the game |
+| `fsnv2.nfl_matchups` | `getNFLGamesForWeek` | kickoff from `gameTime_epoch`, else `gameDate` + `gameTime` (US Eastern) |
+
+Provider quirks are absorbed in `lib/services/normalize.ts`: string-typed
+numbers, `PK` → `K` and `DEF` → `DST`, positions the fantasy pool has no slot for
+(OL, LB, CB) dropped rather than fatal, nested stat groups flattened to
+`{"passing.passYds": 248.6}`, and game status text mapped onto
+`scheduled | in_progress | final | postponed | canceled`.
+
+> **Why `nfl_matchups` and not `matchups`?** `fsnv2.matchups` is the *fantasy*
+> head-to-head schedule: league-scoped, integer franchise slots 1-12, with the
+> unique constraints `fsnv2_generate_schedule` asserts against. Real NFL games
+> have none of that shape, so they land in `fsnv2.nfl_matchups` instead of being
+> forced into a table the season engine owns. Both are read through RPCs, so UI
+> code never has to know which is which.
+
 ## Running locally
 
 ES modules require HTTP (not `file://`):
@@ -308,6 +448,8 @@ npm test               # engine + season suites, then the full 15-round simulati
 npm run test:engine    # draft engine only
 npm run test:season    # season matchup engine only
 npm run test:db        # also persist the simulation to Supabase and verify
+npm run test:sync-data # the sports-data ingestion layer (no network, no keys)
+npm run typecheck      # optional: needs npm i -D typescript @types/node
 ```
 
 `tests/engine.test.mjs` (41 assertions) covers snake rotation across 15 rounds
@@ -323,6 +465,27 @@ starters; scores sit near but not on the projection), the standings invariants
 (wins balance losses, league Points For equals Points Against) and the
 persistence round trip.
 
+`npm run test:sync-data` verifies the ingestion layer in four phases and exits 0
+on a machine with no credentials and no network:
+
+1. **Configuration** — env defaults, `SPORTS_DATA_PROVIDER` swapping the
+   provider, an unknown provider failing fast, a missing API key refusing to run,
+   `SPORTS_DATA_ENDPOINT_*` overrides, week validation.
+2. **Endpoint responses → rows** — the recorded payloads in `lib/fixtures/tank01`
+   run through the *production* Tank01 mapper: bye weeks, `PK` → `K`, injury
+   designations, flattened stat lines, team defenses, UTC kickoffs from both
+   date paths, and a provider 500 coming back as a failed result rather than a
+   crash.
+3. **Database writes** — the *production* repository drives the `fsnv2_sync_*`
+   contract (batching, counting, retries) against an in-memory stand-in that
+   mirrors migration 0004's unique keys. Each task runs **twice**: the second
+   pass must insert 0 rows and update the same count, which is what "upsert, no
+   duplicates" means in terms the runner can check. Batch sizing, a rejected
+   batch still being audited, and `--dry-run` writing nothing are covered too.
+4. **Live** — with `SPORTS_DATA_API_KEY` set it hits the real endpoints; with
+   `--live` and a `SUPABASE_SERVICE_ROLE_KEY` it upserts, re-upserts and reads
+   back through `fsnv2_sync_status`. Without those it reports both as skipped.
+
 `tests/draft-sim.test.mjs` drafts all 180 picks — alternating VOR bot picks and
 simulated clock expiries — prints the board by round, verifies the order, and
 writes `tests/out/draft-sim.json`. With `--db` it pushes every pick through
@@ -335,6 +498,8 @@ straight into Postgres (the file header has the SQL).
 framework preset, no build command.
 **Vercel CLI:** `npx vercel deploy --prod`.
 
-> Projections in `js/playerData.js` are synthetic sample data. Swap that module
-> for a `fetch()` against your projections API — as long as rows return
-> `{ name, position, team, projection }`, nothing else changes.
+> Projections in `js/playerData.js` are synthetic sample data. The background
+> sync service above is the production path: point `SPORTS_DATA_PROVIDER` at a
+> vendor, run `npm run sync:data -- all --week=N`, and the real rows land in
+> `fsnv2.players`, `fsnv2.projections`, `fsnv2.weekly_stats` and
+> `fsnv2.nfl_matchups` for the UI to read through the `fsnv2_*` RPCs.
