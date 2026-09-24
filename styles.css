@@ -66,10 +66,10 @@ kbd {
 /* ----------------------------------------------------------------- header */
 
 .draft-header {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  gap: 20px;
+  display: flex;
   align-items: center;
+  flex-wrap: nowrap;
+  gap: 1.5rem;
   padding: 14px 22px;
   background: linear-gradient(180deg, rgba(17, 21, 29, 0.96), rgba(11, 14, 20, 0.92));
   border-bottom: 1px solid var(--line);
@@ -107,7 +107,7 @@ kbd {
   color: var(--text-faint);
 }
 
-.clock { display: flex; align-items: center; gap: 22px; min-width: 0; }
+.clock { display: flex; align-items: center; gap: 18px; min-width: 0; flex: 0 1 auto; }
 
 .clock__counters { display: flex; gap: 10px; }
 
@@ -135,7 +135,7 @@ kbd {
   color: var(--brand-bright);
 }
 
-.clock__team { min-width: 0; }
+.clock__team { min-width: 0; flex: 1 1 auto; }
 .clock__eyebrow {
   display: inline-flex; align-items: center; gap: 6px;
   font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--text-faint);
@@ -159,7 +159,28 @@ kbd {
   100% { box-shadow: 0 0 0 0 rgba(255, 59, 59, 0); }
 }
 
-.draft-header__controls { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+/* Left group: counters, on-the-clock team, pick clock and the next-up queue.
+   `min-width: 0` lets it shrink instead of pushing the buttons off the row. */
+.draft-header__status {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Right group: never shrinks, never wraps, always on top of the row. */
+.draft-header__controls {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+  justify-content: flex-end;
+  align-items: center;
+  flex: 0 0 auto;
+  margin-left: auto;
+  position: relative;
+  z-index: 2;
+}
 
 /* ---------------------------------------------------------------- buttons */
 
@@ -237,8 +258,6 @@ kbd {
 }
 @media (max-width: 1100px) {
   .layout { grid-template-columns: minmax(0, 1fr); padding: 14px; }
-  .draft-header { grid-template-columns: 1fr; gap: 14px; }
-  .draft-header__controls { justify-content: flex-start; }
 }
 
 /* ----------------------------------------------------------------- panels */
@@ -883,15 +902,27 @@ kbd {
 
 /* --------------------------------------------------------------- next up --- */
 
-.next-up { display: flex; align-items: center; gap: 12px; min-width: 0; }
+/* A single horizontal row of compact badges. It is the first thing to give up
+   space: it clips (and hides entirely on narrow screens) so it can never wrap
+   into a vertical stack over the buttons. */
+.next-up {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  z-index: 1;
+}
 .next-up__label {
   font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--text-faint);
   white-space: nowrap;
 }
-.next-up ul { display: flex; gap: 6px; list-style: none; margin: 0; padding: 0; flex-wrap: wrap; }
+.next-up ul { display: flex; gap: 6px; list-style: none; margin: 0; padding: 0; flex-wrap: nowrap; overflow: hidden; }
 .next-up__item {
   display: flex; flex-direction: column; align-items: center; gap: 1px;
-  padding: 5px 10px;
+  flex: 0 0 auto;
+  padding: 5px 9px;
   border-radius: var(--radius-sm);
   background: rgba(255, 255, 255, 0.025);
   border: 1px solid var(--line);
@@ -952,7 +983,6 @@ kbd {
   .app-nav__links { order: 3; width: 100%; margin-left: 0; }
   .view { padding: 16px 14px 28px; }
   .view-title { font-size: 22px; }
-  .next-up { display: none; }
 }
 
 /* Round labels carry the snake direction for that row. */
@@ -964,3 +994,29 @@ kbd {
   opacity: 0.7;
 }
 .board-round.is-reverse::after { content: '←'; color: var(--brand); opacity: 0.85; }
+
+/* --- Header containment, widest to narrowest ------------------------------
+   Each step drops the least important element so the bar stays one clean row
+   for as long as possible, then wraps deliberately instead of colliding.     */
+
+/* Trim the queue to two badges before it can squeeze the buttons. */
+@media (max-width: 1499px) {
+  .next-up__item:nth-child(n + 3) { display: none; }
+}
+
+/* No room for the queue at all — hide it rather than collapse it to 0px. */
+@media (max-width: 1279px) {
+  .next-up { display: none; }
+}
+
+/* Below this the buttons need their own row; the header wraps on purpose. */
+@media (max-width: 1100px) {
+  .draft-header { flex-wrap: wrap; gap: 14px; }
+  .draft-header__status { flex: 1 1 100%; }
+  .draft-header__controls {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    margin-left: 0;
+    flex: 1 1 100%;
+  }
+}

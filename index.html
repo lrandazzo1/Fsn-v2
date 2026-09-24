@@ -127,6 +127,9 @@
   <!-- ================================================== DRAFT ROOM VIEW -->
   <section class="view view--draft" data-view="draft" hidden>
     <header class="draft-header">
+      <!-- Clock + next-up share one sizing container so neither can collide
+           with the action buttons, which stay pinned to the right. -->
+      <div class="draft-header__status">
       <div class="clock">
         <div class="clock__counters">
           <div class="counter"><span class="counter__label">Round</span><span class="counter__value" id="roundLabel">1</span></div>
@@ -154,6 +157,7 @@
       <div class="next-up">
         <span class="next-up__label">Next up</span>
         <ul id="nextUpList"></ul>
+      </div>
       </div>
 
       <div class="draft-header__controls">
