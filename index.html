@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FSN v2 · Draft &amp; League Engine</title>
+  <meta name="description" content="Live 12-team snake draft room with VOR-based player valuations, auto-draft bots, and real-time rosters." />
+
+  <!-- Open-source CDNs: Tailwind utility layer + Lucide icons + Inter/JetBrains Mono -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    // Optional utility layer — the app is fully styled by styles.css if the CDN is unavailable.
+    window.tailwind = window.tailwind || {};
+    window.tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              400: '#38e0a5', 500: '#12c98a', 600: '#0ba475'
+            },
+            ink: {
+              900: '#07090d', 850: '#0b0e14', 800: '#11151d', 700: '#181d27', 600: '#232936'
+            }
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+            mono: ['"JetBrains Mono"', 'ui-monospace', 'monospace']
+          }
+        }
+      }
+    };
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏈</text></svg>" />
+</head>
+
+<body class="bg-ink-900 text-slate-200 font-sans antialiased">
+  <!-- ======================================================= DRAFT HEADER -->
+  <header class="app-header">
+    <div class="app-header__brand">
+      <div class="brand-mark"><i data-lucide="radio"></i></div>
+      <div>
+        <h1 class="brand-title">FSN<span>v2</span></h1>
+        <p class="brand-sub">Draft &amp; League Engine</p>
+      </div>
+    </div>
+
+    <div class="clock">
+      <div class="clock__counters">
+        <div class="counter">
+          <span class="counter__label">Round</span>
+          <span class="counter__value" id="roundLabel">1</span>
+        </div>
+        <div class="counter">
+          <span class="counter__label">Pick</span>
+          <span class="counter__value" id="pickLabel">1</span>
+        </div>
+      </div>
+      <div class="clock__team">
+        <span class="clock__eyebrow" id="clockEyebrow"><span class="live-dot"></span> On the clock</span>
+        <h2 id="onClockTeam">—</h2>
+        <p id="onClockMeta">Loading draft room…</p>
+      </div>
+    </div>
+
+    <div class="app-header__controls">
+      <button id="btnMakePick" class="btn btn--primary"><i data-lucide="check-circle-2"></i> Make Pick</button>
+      <button id="btnAutoPick" class="btn"><i data-lucide="zap"></i> Auto Pick</button>
+      <button id="btnSimRound" class="btn"><i data-lucide="fast-forward"></i> Simulate Round</button>
+      <button id="btnSimToMe" class="btn"><i data-lucide="skip-forward"></i> Sim To My Pick</button>
+      <button id="toggleAutoDraft" class="btn btn--toggle" aria-pressed="false"><i data-lucide="bot"></i> Auto-Draft</button>
+      <button id="btnUndo" class="btn btn--ghost"><i data-lucide="undo-2"></i> Undo</button>
+      <button id="btnReset" class="btn btn--danger"><i data-lucide="rotate-ccw"></i> Reset</button>
+    </div>
+  </header>
+
+  <div class="progress">
+    <div class="progress__track"><div class="progress__bar" id="progressBar"></div></div>
+    <span class="progress__text" id="progressText">0 / 180 picks · 0%</span>
+  </div>
+
+  <!-- ============================================================== MAIN -->
+  <main class="layout">
+    <!-- ------------------------------------------------- DRAFT BOARD GRID -->
+    <section class="panel panel--board">
+      <div class="panel__head">
+        <h3><i data-lucide="layout-grid"></i> Draft Board</h3>
+        <span class="chip" id="boardStatus">Round 1 of 15</span>
+      </div>
+      <div class="board-scroll">
+        <div class="board" id="draftBoard"></div>
+      </div>
+      <div class="legend">
+        <span class="legend__item"><i class="dot dot--qb"></i>QB</span>
+        <span class="legend__item"><i class="dot dot--rb"></i>RB</span>
+        <span class="legend__item"><i class="dot dot--wr"></i>WR</span>
+        <span class="legend__item"><i class="dot dot--te"></i>TE</span>
+        <span class="legend__item"><i class="dot dot--dst"></i>DST / K</span>
+        <span class="legend__hint">Click any column to load that roster · <kbd>/</kbd> search · <kbd>Enter</kbd> pick · <kbd>S</kbd> sim round</span>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------------ PLAYER POOL -->
+    <section class="panel panel--pool">
+      <div class="panel__head">
+        <h3><i data-lucide="users"></i> Player Pool</h3>
+        <span class="chip" id="poolCount">0 of 0</span>
+      </div>
+
+      <div class="pool-controls">
+        <label class="search">
+          <i data-lucide="search"></i>
+          <input id="playerSearch" type="search" placeholder="Search player, team or position…" autocomplete="off" />
+        </label>
+
+        <div class="filters" id="positionFilters">
+          <button class="filter is-active" data-position="ALL">All</button>
+          <button class="filter filter--qb" data-position="QB">QB</button>
+          <button class="filter filter--rb" data-position="RB">RB</button>
+          <button class="filter filter--wr" data-position="WR">WR</button>
+          <button class="filter filter--te" data-position="TE">TE</button>
+          <button class="filter filter--flex" data-position="FLEX">FLEX</button>
+          <button class="filter filter--k" data-position="K">K</button>
+          <button class="filter filter--dst" data-position="DST">DST</button>
+        </div>
+
+        <div class="pool-controls__row">
+          <label class="select">
+            <span>Sort</span>
+            <select id="sortSelect">
+              <option value="vor">VOR</option>
+              <option value="adp">ADP</option>
+              <option value="projection">Projection</option>
+              <option value="name">Name</option>
+            </select>
+          </label>
+          <label class="switch" id="hideDraftedWrap">
+            <input type="checkbox" checked />
+            <span>Hide drafted</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="player-list" id="playerPool"></div>
+
+      <div class="selection-card">
+        <div>
+          <p class="selection-card__label">On your card</p>
+          <p class="selection-card__name" id="selectionName">No player selected</p>
+          <p class="selection-card__meta" id="selectionMeta">Click a player in the pool to put them on the card.</p>
+        </div>
+        <i data-lucide="clipboard-check"></i>
+      </div>
+    </section>
+
+    <!-- ----------------------------------------------------- ROSTER PANEL -->
+    <aside class="panel panel--roster">
+      <div class="panel__head">
+        <h3><i data-lucide="shield"></i> Roster</h3>
+        <select id="rosterTeamSelect" class="team-select"></select>
+      </div>
+
+      <div class="roster-stats" id="rosterNeeds"></div>
+      <div class="roster-slots" id="rosterSlots"></div>
+
+      <div class="panel__subhead"><i data-lucide="sparkles"></i> VOR Recommendations</div>
+      <div class="rec-list" id="recommendations"></div>
+
+      <div class="panel__subhead"><i data-lucide="bar-chart-3"></i> Positional Scarcity</div>
+      <ul class="scarcity-list" id="scarcityList"></ul>
+
+      <div class="panel__subhead"><i data-lucide="history"></i> Recent Picks</div>
+      <ul class="feed" id="recentPicks"></ul>
+    </aside>
+  </main>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/lucide@0.456.0/dist/umd/lucide.min.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
