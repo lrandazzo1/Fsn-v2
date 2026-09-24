@@ -1,0 +1,36 @@
+{
+  "statusCode": 200,
+  "body": [
+    {
+      "gameID": "20260913_CHI@MIN",
+      "seasonType": "Regular Season",
+      "season": "2026",
+      "gameWeek": "Week 3",
+      "away": "CHI",
+      "home": "MIN",
+      "teamIDAway": "6",
+      "teamIDHome": "18",
+      "gameDate": "20260913",
+      "gameTime": "1:00p",
+      "gameTime_epoch": "1789318800.0",
+      "gameStatus": "Completed",
+      "awayPts": "20",
+      "homePts": "24",
+      "neutralSite": "False"
+    },
+    {
+      "gameID": "20260913_GB@DET",
+      "seasonType": "Regular Season",
+      "season": "2026",
+      "gameWeek": "Week 3",
+      "away": "GB",
+      "home": "DET",
+      "teamIDAway": "12",
+      "teamIDHome": "11",
+      "gameDate": "20260913",
+      "gameTime": "4:25p",
+      "gameStatus": "Scheduled",
+      "neutralSite": "False"
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "//": "Editor/CI typechecking only — nothing here is built. Node 22+ strips the types at run time, so `node scripts/sync-data.ts` works with no bundler and no install. `npm run typecheck` needs TypeScript and Node's types: npm i -D typescript @types/node",
+  "compilerOptions": {
+    "target": "es2023",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "lib": ["es2023", "dom"],
+    "types": ["node"],
+    "strict": true,
+    "noEmit": true,
+    "noUncheckedIndexedAccess": false,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true
+  },
+  "include": ["lib/**/*.ts", "scripts/**/*.ts"]
+}
