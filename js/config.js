@@ -33,8 +33,15 @@ export const CONFIG = {
     userTeamId: runtime.league?.userTeamId || 1
   },
 
+  season: {
+    weeks: runtime.season?.weeks || 14,
+    /** Shared with `p_seed` in fsnv2_generate_schedule() — keep the two in step. */
+    seed: runtime.season?.seed || 20260208
+  },
+
   storageKeys: {
     draft: 'fsnv2.draft.v1',
-    ids: 'fsnv2.ids.v1'
+    ids: 'fsnv2.ids.v1',
+    season: 'fsnv2.season.v1'
   }
 };

@@ -1020,3 +1020,310 @@ kbd {
     flex: 1 1 100%;
   }
 }
+
+/* =============================================================================
+   PHASE 2 — Matchup & Scoreboard hub: week selector, head-to-head lineups,
+   live win-probability bar and the six-game league scoreboard.
+   ========================================================================== */
+
+/* -------------------------------------------------------------- dev bar --- */
+
+.dev-toolbar {
+  padding: 6px 6px 6px 12px;
+  border: 1px dashed rgba(234, 179, 8, 0.4);
+  border-radius: 999px;
+  background: rgba(234, 179, 8, 0.05);
+}
+.dev-toolbar__label {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 9.5px; letter-spacing: 0.18em; text-transform: uppercase;
+  color: #eab308;
+}
+.dev-toolbar__label svg { width: 13px; height: 13px; }
+
+/* ------------------------------------------------------- week selector --- */
+
+.week-bar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  background: linear-gradient(180deg, rgba(21, 26, 36, 0.92), rgba(13, 17, 24, 0.92));
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.week-bar__label {
+  font-size: 9.5px; letter-spacing: 0.2em; text-transform: uppercase;
+  color: var(--text-faint); white-space: nowrap;
+}
+.week-bar__weeks { display: flex; gap: 5px; flex-wrap: wrap; flex: 1; }
+
+.week-chip {
+  display: flex; flex-direction: column; align-items: center; gap: 0;
+  min-width: 42px; padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+.week-chip:hover { color: var(--text); background: rgba(255, 255, 255, 0.055); }
+.week-chip__num { font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 600; }
+.week-chip__state { font-size: 8.5px; letter-spacing: 0.1em; color: var(--text-faint); }
+.week-chip.is-final { border-color: rgba(18, 201, 138, 0.3); }
+.week-chip.is-final .week-chip__state { color: var(--brand); }
+.week-chip.is-active {
+  color: var(--ink-900);
+  background: linear-gradient(180deg, var(--brand-bright), var(--brand));
+  border-color: var(--brand-bright);
+}
+.week-chip.is-active .week-chip__state { color: rgba(7, 9, 13, 0.7); }
+
+/* ------------------------------------------------------- mode switcher --- */
+
+.mode-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.mode-switch {
+  display: inline-flex; gap: 3px;
+  padding: 3px;
+  background: var(--ink-800);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+.mode-switch__btn {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 7px 15px;
+  border: 0; border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12.5px; font-weight: 600;
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+.mode-switch__btn svg { width: 15px; height: 15px; }
+.mode-switch__btn:hover { color: var(--text); }
+.mode-switch__btn.is-active {
+  color: var(--brand-bright);
+  background: rgba(18, 201, 138, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(18, 201, 138, 0.35);
+}
+
+/* ------------------------------------------------------- team logo chip --- */
+
+.team-logo {
+  position: relative;
+  display: grid; place-items: center;
+  width: 22px; height: 22px;
+  flex: none;
+  border-radius: 999px;
+  background: var(--team-color, #475569);
+  overflow: hidden;
+}
+.team-logo__abbr {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 7px; font-weight: 600; letter-spacing: -0.02em;
+  color: #fff;
+  mix-blend-mode: normal;
+}
+.team-logo img {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: contain;
+  background: rgba(7, 9, 13, 0.55);
+}
+
+/* ----------------------------------------------------------- head to head -- */
+
+.h2h { padding: 16px; }
+
+.h2h__hero {
+  display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 16px;
+  padding-bottom: 14px;
+}
+.h2h__team { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.h2h__team.is-right { text-align: right; align-items: flex-end; }
+.h2h__abbr {
+  font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: 0.08em;
+  color: var(--text-faint);
+}
+.h2h__team-name { font-size: 16px; font-weight: 700; }
+.h2h__record { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--text-dim); }
+.h2h__team.is-winner .h2h__team-name { color: var(--brand-bright); }
+
+.h2h__scores { display: flex; align-items: center; gap: 14px; }
+.h2h__score {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 34px; font-weight: 600; line-height: 1;
+  color: var(--text);
+}
+.h2h__score.is-winner { color: var(--brand-bright); }
+.h2h__dash {
+  font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+/* --------------------------------------------------------- win probability -- */
+
+.winprob {
+  padding: 12px 0 16px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 14px;
+}
+.winprob__head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px; }
+.winprob__pct { font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 600; color: var(--brand-bright); }
+.winprob__pct.is-right { color: #7dd3fc; }
+.winprob__label { font-size: 9.5px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--text-faint); }
+.winprob__bar {
+  height: 8px; border-radius: 999px; overflow: hidden;
+  background: linear-gradient(90deg, rgba(56, 189, 248, 0.45), rgba(56, 189, 248, 0.7));
+}
+.winprob__bar span {
+  display: block; height: 100%;
+  background: linear-gradient(90deg, var(--brand), var(--brand-bright));
+  transition: width 0.4s ease;
+}
+.winprob__note { margin: 9px 0 0; font-size: 12px; color: var(--text-dim); }
+.winprob__note strong { color: var(--text); font-family: 'JetBrains Mono', monospace; }
+
+/* ------------------------------------------------------- lineup compare --- */
+
+.h2h__grid {
+  display: grid;
+  grid-template-columns: 1fr 74px 1fr;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+.h2h__col-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 0 8px 6px;
+  font-size: 9.5px; letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--text-faint);
+}
+.h2h__col-head.is-right { flex-direction: row; }
+.h2h__col-pts { color: var(--text-faint); }
+.h2h__col-slot { text-align: center; font-size: 9.5px; letter-spacing: 0.14em; color: var(--text-faint); }
+
+.h2h__cell {
+  padding: 6px 8px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.018);
+  min-width: 0;
+}
+.h2h__cell.is-right { text-align: right; }
+
+.h2h__player {
+  display: flex; align-items: center; gap: 9px;
+  min-width: 0;
+  color: var(--text-dim);
+}
+.h2h__cell.is-right .h2h__player { justify-content: flex-end; }
+.h2h__player-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
+.h2h__cell.is-right .h2h__player-main { align-items: flex-end; }
+.h2h__player-name {
+  font-size: 12.5px; font-weight: 600; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+}
+.h2h__player-meta { font-size: 10.5px; color: var(--text-faint); white-space: nowrap; }
+.h2h__player b {
+  font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 600;
+  color: var(--text-dim); flex: none; min-width: 42px; text-align: right;
+}
+.h2h__cell.is-right .h2h__player b { text-align: left; }
+.h2h__player b.is-win { color: var(--brand-bright); }
+.h2h__player.is-empty { color: var(--text-faint); }
+.h2h__player.is-empty em { font-size: 11.5px; flex: 1; }
+
+.h2h__total {
+  margin-top: 6px; padding: 9px 12px;
+  border-radius: 7px;
+  background: rgba(18, 201, 138, 0.07);
+  border: 1px solid rgba(18, 201, 138, 0.22);
+}
+.h2h__total.is-right { text-align: right; }
+.h2h__total-val {
+  font-family: 'JetBrains Mono', monospace; font-size: 17px; font-weight: 600;
+  color: var(--brand-bright);
+}
+
+/* ---------------------------------------------------------- scoreboard --- */
+
+.scoreboard {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 12px;
+  padding: 14px;
+}
+
+.game-card {
+  display: flex; flex-direction: column; gap: 7px;
+  padding: 13px 14px;
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, rgba(21, 26, 36, 0.92), rgba(13, 17, 24, 0.92));
+  border: 1px solid var(--line);
+  cursor: pointer;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+.game-card:hover { border-color: var(--line-strong); transform: translateY(-1px); }
+.game-card.is-user { border-color: rgba(18, 201, 138, 0.35); }
+
+.game-card__head { display: flex; align-items: center; justify-content: space-between; }
+.game-card__status {
+  font-size: 9px; letter-spacing: 0.16em; font-weight: 700;
+  padding: 2px 7px; border-radius: 999px;
+  color: var(--text-faint); background: rgba(255, 255, 255, 0.04);
+}
+.game-card__status.is-final { color: var(--brand-bright); background: rgba(18, 201, 138, 0.12); }
+.game-card__week { font-size: 10px; color: var(--text-faint); }
+
+.game-card__side { display: flex; align-items: center; gap: 10px; }
+.game-card__abbr {
+  font-family: 'JetBrains Mono', monospace; font-size: 10.5px; font-weight: 600;
+  padding: 3px 7px; border-radius: 5px;
+  background: var(--ink-700); border: 1px solid var(--line);
+  flex: none;
+}
+.game-card__name {
+  display: flex; align-items: baseline; gap: 7px; flex: 1; min-width: 0;
+  font-size: 13px; font-weight: 600; color: var(--text-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.game-card__name em { color: var(--brand); font-style: normal; font-size: 11px; }
+.game-card__record { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: var(--text-faint); }
+.game-card__score {
+  font-family: 'JetBrains Mono', monospace; font-size: 18px; font-weight: 600;
+  color: var(--text-dim); flex: none;
+}
+.game-card__side.is-winner .game-card__name,
+.game-card__side.is-winner .game-card__score { color: var(--brand-bright); }
+
+.game-card__bar {
+  height: 4px; border-radius: 999px; overflow: hidden;
+  background: rgba(56, 189, 248, 0.45);
+  margin-top: 3px;
+}
+.game-card__bar span { display: block; height: 100%; background: var(--brand); }
+
+/* ------------------------------------------------------------- responsive -- */
+
+@media (max-width: 860px) {
+  .h2h__grid { grid-template-columns: 1fr 56px 1fr; gap: 3px 5px; }
+  .h2h__player-meta { display: none; }
+  .h2h__player b { min-width: 34px; font-size: 12px; }
+  .h2h__score { font-size: 26px; }
+  .h2h__scores { gap: 8px; }
+  .week-chip { min-width: 36px; padding: 4px 6px; }
+}
+
+/* Standings record + point-differential columns. */
+.data-table .record { font-family: 'JetBrains Mono', monospace; font-weight: 600; }
+.data-table .is-pos { color: var(--brand-bright); }
+.data-table .is-neg { color: #fca5a5; }
+
+/* `.select` sets display:flex, which would otherwise win over the `hidden`
+   attribute the Matchup hub uses to swap the franchise picker in and out. */
+.select[hidden] { display: none; }

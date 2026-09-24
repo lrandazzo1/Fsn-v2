@@ -50,6 +50,7 @@
       <a href="#/" data-nav="home"><i data-lucide="home"></i> Dashboard</a>
       <a href="#/league" data-nav="league"><i data-lucide="trophy"></i> League</a>
       <a href="#/draft" data-nav="draft"><i data-lucide="layout-grid"></i> Draft Room</a>
+      <a href="#/matchups" data-nav="matchups"><i data-lucide="swords"></i> Matchups</a>
       <a href="#/team/1" data-nav="team"><i data-lucide="shield"></i> My Team</a>
     </div>
 
@@ -105,13 +106,32 @@
 
     <section class="panel">
       <div class="panel__head">
-        <h3><i data-lucide="list-ordered"></i> Standings — projected starter points</h3>
+        <h3><i data-lucide="list-ordered"></i> Standings — W-L, Points For / Against</h3>
         <span class="chip" id="leaguePickChip">—</span>
       </div>
       <div class="table-scroll">
         <table class="data-table" id="standingsTable">
           <thead>
-            <tr><th>#</th><th>Franchise</th><th>Picks</th><th>QB</th><th>RB</th><th>WR</th><th>TE</th><th>K</th><th>DST</th><th class="num">Total VOR</th><th class="num">Starter Pts</th><th></th></tr>
+            <tr>
+              <th>#</th><th>Franchise</th><th>Record</th><th class="num">PCT</th>
+              <th class="num">PF</th><th class="num">PA</th><th class="num">Diff</th>
+              <th>Streak</th><th class="num">Proj/Wk</th><th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel__head">
+        <h3><i data-lucide="users"></i> Roster Composition</h3>
+        <span class="chip" id="leagueRosterChip">—</span>
+      </div>
+      <div class="table-scroll">
+        <table class="data-table" id="rosterTable">
+          <thead>
+            <tr><th>Franchise</th><th>Picks</th><th>QB</th><th>RB</th><th>WR</th><th>TE</th><th>K</th><th>DST</th><th class="num">Total VOR</th><th class="num">Starter Pts</th></tr>
           </thead>
           <tbody></tbody>
         </table>
@@ -266,6 +286,65 @@
     </main>
   </section>
 
+  <!-- ============================================ MATCHUP / SCOREBOARD VIEW -->
+  <section class="view" data-view="matchups" hidden>
+    <header class="view-head">
+      <div>
+        <p class="view-eyebrow">Matchup &amp; Scoreboard</p>
+        <h1 class="view-title" id="matchupTitle">Week 1</h1>
+        <p class="view-sub" id="matchupSub">14-week season · 6 head-to-head games a week</p>
+      </div>
+
+      <!-- Dev toolbar: drives the dummy score engine so the season can be
+           played through without waiting on real games. -->
+      <div class="view-head__actions dev-toolbar" id="matchupDevBar">
+        <span class="dev-toolbar__label"><i data-lucide="flask-conical"></i> Dev</span>
+        <button id="btnSimWeek" class="btn btn--primary"><i data-lucide="dices"></i> Simulate Week</button>
+        <button id="btnSimSeason" class="btn"><i data-lucide="fast-forward"></i> Sim To Week</button>
+        <button id="btnResetSeason" class="btn btn--danger"><i data-lucide="rotate-ccw"></i> Reset Season</button>
+      </div>
+    </header>
+
+    <!-- Week selector: weeks 1-14 -->
+    <nav class="week-bar" aria-label="Week selector">
+      <span class="week-bar__label">Week</span>
+      <div class="week-bar__weeks" id="matchupWeeks"></div>
+    </nav>
+
+    <div class="mode-bar">
+      <div class="mode-switch" id="matchupModes" role="tablist">
+        <button class="mode-switch__btn is-active" data-mode="mine" role="tab" aria-selected="true">
+          <i data-lucide="swords"></i> My Matchup
+        </button>
+        <button class="mode-switch__btn" data-mode="league" role="tab" aria-selected="false">
+          <i data-lucide="layout-grid"></i> League Scoreboard
+        </button>
+      </div>
+      <label class="select" id="matchupTeamWrap">
+        <span>Franchise</span>
+        <select id="matchupTeamSelect" class="team-select"></select>
+      </label>
+    </div>
+
+    <!-- My Matchup: head-to-head hero + side-by-side starting lineups -->
+    <section class="panel" id="myMatchupPanel">
+      <div class="panel__head">
+        <h3><i data-lucide="swords"></i> Head to Head</h3>
+        <span class="chip" id="matchupStatusChip">—</span>
+      </div>
+      <div id="myMatchup"></div>
+    </section>
+
+    <!-- League Scoreboard: all 6 games for the selected week -->
+    <section class="panel" id="scoreboardPanel" hidden>
+      <div class="panel__head">
+        <h3><i data-lucide="layout-grid"></i> League Scoreboard</h3>
+        <span class="chip" id="scoreboardChip">—</span>
+      </div>
+      <div class="scoreboard" id="leagueScoreboard"></div>
+    </section>
+  </section>
+
   <!-- ========================================================= TEAM VIEW -->
   <section class="view" data-view="team" hidden>
     <header class="view-head">
@@ -295,8 +374,8 @@
 
       <section class="panel">
         <div class="panel__head">
-          <h3><i data-lucide="swords"></i> Week 1 Matchup</h3>
-          <select id="opponentSelect" class="team-select"></select>
+          <h3><i data-lucide="swords"></i> <span id="teamMatchupHead">Week 1 Matchup</span></h3>
+          <select id="teamWeekSelect" class="team-select"></select>
         </div>
         <div class="matchup" id="matchup"></div>
         <div class="panel__subhead"><i data-lucide="list"></i> Draft Log</div>

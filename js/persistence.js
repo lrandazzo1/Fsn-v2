@@ -284,3 +284,110 @@ export class DraftRepository {
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+/**
+ * SeasonRepository
+ * -----------------------------------------------------------------------------
+ * Phase 2 persistence: the 14-week schedule, simulated weeks and the W-L table.
+ *
+ * It borrows the draft repository's transport rather than opening its own — the
+ * league id, the PostgREST plumbing and the sync-status pill are all already
+ * there, and a season only ever exists alongside the draft that produced it.
+ * Reads and writes go straight out (no retry queue): unlike a pick, a simulated
+ * week is a deliberate action the operator can simply run again.
+ */
+export class SeasonRepository {
+  /** @param {DraftRepository} draftRepo */
+  constructor(draftRepo) {
+    this.repo = draftRepo;
+  }
+
+  get enabled() {
+    return this.repo.enabled;
+  }
+
+  get leagueId() {
+    return this.repo.leagueId;
+  }
+
+  /** Creates the schedule if the league has none; returns the matchup rows. */
+  generateSchedule({ weeks = 14, seed, replace = false } = {}) {
+    return this.rpc('fsnv2_generate_schedule', {
+      p_league_id: this.leagueId,
+      p_weeks: weeks,
+      ...(seed === undefined ? {} : { p_seed: seed }),
+      p_replace: replace
+    });
+  }
+
+  /** Schedule, standings and every recorded box-score row in one round trip. */
+  seasonState() {
+    return this.rpc('fsnv2_season_state', { p_league_id: this.leagueId });
+  }
+
+  matchups(week = null) {
+    return this.rpc('fsnv2_matchups', { p_league_id: this.leagueId, p_week: week });
+  }
+
+  /**
+   * Writes one simulated week. The RPC re-sums the team totals from these rows,
+   * so the matchup scores can never drift from the box score underneath them.
+   * @param {number} week
+   * @param {Array<Object>} scores rows from SeasonEngine.simulateWeek()
+   */
+  simulateWeek(week, scores) {
+    return this.rpc('fsnv2_simulate_week', {
+      p_league_id: this.leagueId,
+      p_week: week,
+      p_scores: scores
+    });
+  }
+
+  seasonStandings() {
+    return this.rpc('fsnv2_season_standings', { p_league_id: this.leagueId });
+  }
+
+  /** Rolls one week — or the whole season — back to unplayed. */
+  resetSeason(week = null) {
+    return this.rpc('fsnv2_reset_season', { p_league_id: this.leagueId, p_week: week });
+  }
+
+  /** Resolves to null instead of throwing when Supabase is off or unprovisioned. */
+  rpc(name, args) {
+    if (!this.enabled || !this.leagueId) return Promise.resolve(null);
+    return this.repo.rpc(name, args);
+  }
+
+  /* ------------------------------------------------------- local mirror ---- */
+
+  saveLocal(snapshot) {
+    if (!hasLocalStorage) return;
+    try {
+      localStorage.setItem(
+        CONFIG.storageKeys.season,
+        JSON.stringify({ ...snapshot, savedAt: new Date().toISOString() })
+      );
+    } catch {
+      /* quota or private mode — the DB is the source of truth anyway */
+    }
+  }
+
+  loadLocal() {
+    if (!hasLocalStorage) return null;
+    try {
+      const raw = localStorage.getItem(CONFIG.storageKeys.season);
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  clearLocal() {
+    if (!hasLocalStorage) return;
+    try {
+      localStorage.removeItem(CONFIG.storageKeys.season);
+    } catch {
+      /* ignore */
+    }
+  }
+}

@@ -13,8 +13,9 @@
 
 import { CONFIG } from './config.js';
 import { DraftEngine } from './draftEngine.js';
-import { DraftRepository } from './persistence.js';
+import { DraftRepository, SeasonRepository } from './persistence.js';
 import { Router } from './router.js';
+import { SeasonEngine } from './seasonEngine.js';
 import {
   cacheDom,
   dom,
@@ -27,6 +28,7 @@ import {
 } from './uiRenderer.js';
 import { createHomeView } from './views/home.js';
 import { createLeagueView } from './views/league.js';
+import { createMatchupView } from './views/matchup.js';
 import { createTeamView } from './views/team.js';
 
 /** Transient view state — never persisted into the draft itself. */
@@ -38,7 +40,11 @@ const ui = {
   poolLimit: 120,
   selectedTeamId: CONFIG.league.userTeamId,
   selectedPlayerId: null,
-  route: 'home'
+  route: 'home',
+  /** Season state shared by the Matchup hub, the Team page and the dev bar. */
+  week: 1,
+  matchupMode: 'mine',
+  matchupTeamId: CONFIG.league.userTeamId
 };
 
 const engine = new DraftEngine({
@@ -48,7 +54,14 @@ const engine = new DraftEngine({
   timerSeconds: CONFIG.league.timerSeconds
 });
 
+const season = new SeasonEngine({
+  engine,
+  weeks: CONFIG.season.weeks,
+  seed: CONFIG.season.seed
+});
+
 const repo = new DraftRepository({ onStatus: (status) => renderSyncStatus(status) });
+const seasonRepo = new SeasonRepository(repo);
 
 /** Guards the animated bot loop so two runs never overlap. */
 let simulation = { running: false, cancel: false };
@@ -68,8 +81,9 @@ async function init() {
 
   views = {
     home: createHomeView({ engine, config: CONFIG }),
-    league: createLeagueView({ engine, config: CONFIG }),
-    team: null // created after the router exists (it needs router.go)
+    league: createLeagueView({ engine, season, config: CONFIG }),
+    matchups: null, // both need router.go, so they are created below
+    team: null
   };
 
   router = new Router(
@@ -77,18 +91,33 @@ async function init() {
       { path: '/', name: 'home', view: { enter: () => views.home.enter() } },
       { path: '/league', name: 'league', view: { enter: () => views.league.enter() } },
       { path: '/draft', name: 'draft', view: { enter: enterDraftRoom, leave: leaveDraftRoom } },
+      { path: '/matchups', name: 'matchups', view: { enter: () => views.matchups.enter({}) } },
+      { path: '/matchups/:week', name: 'matchups', view: { enter: (params) => views.matchups.enter(params) } },
       { path: '/team/:id', name: 'team', view: { enter: (params) => views.team.enter(params) } }
     ],
     { onChange: onRouteChange }
   );
 
-  views.team = createTeamView({ engine, router });
+  views.matchups = createMatchupView({
+    engine,
+    season,
+    ui,
+    router,
+    onSimulateWeek: simulateWeek,
+    onSimulateThrough: simulateThrough,
+    onResetSeason: resetSeason
+  });
+  views.team = createTeamView({ engine, season, ui, router });
+
+  season.on('change', onSeasonChange);
+  ui.week = season.currentWeek;
 
   renderSyncStatus({ status: repo.enabled ? 'idle' : 'offline' });
   router.start();
   renderAll(engine, ui);
 
   await restoreDraft();
+  await restoreSeason();
 }
 
 /**
@@ -163,6 +192,95 @@ function onClockExpiry({ pick }) {
   if (pick.teamId === engine.userTeamId) runSimulation({ mode: 'toUser' });
 }
 
+/* -------------------------------------------------------------- the season */
+
+/**
+ * Restore order mirrors the draft: Postgres first, then the localStorage
+ * mirror, then the locally generated schedule the engine already built in its
+ * constructor. Because the generator is deterministic and mirrored in SQL, all
+ * three produce the same 14 weeks — only the scores differ.
+ */
+async function restoreSeason() {
+  if (seasonRepo.enabled && seasonRepo.leagueId) {
+    try {
+      // Idempotent: creates the schedule the first time, no-ops afterwards.
+      await seasonRepo.generateSchedule({ weeks: CONFIG.season.weeks, seed: CONFIG.season.seed });
+      const state = await seasonRepo.seasonState();
+      if (state?.matchups?.length) {
+        season.hydrate({ matchups: state.matchups, scores: state.scores });
+        ui.week = season.currentWeek;
+        refreshView();
+        return;
+      }
+    } catch (error) {
+      toast('Season schedule unavailable — using the local schedule.', 'warn');
+    }
+  }
+
+  const local = seasonRepo.loadLocal();
+  if (local?.matchups?.length) {
+    season.hydrate(local);
+    ui.week = season.currentWeek;
+    refreshView();
+  }
+}
+
+function onSeasonChange() {
+  seasonRepo.saveLocal(season.toJSON());
+  refreshView();
+}
+
+/**
+ * Dev control — the dummy score engine behind the "Simulate Week" button.
+ * Scores are rolled locally, then written through fsnv2_simulate_week, which
+ * re-sums the team totals from the box score so the database is authoritative.
+ */
+async function simulateWeek(week) {
+  if (season.isWeekPlayed(week)) {
+    toast(`Week ${week} has already been played.`, 'warn');
+    return;
+  }
+  if (engine.picks.length === 0) {
+    toast('Draft a roster first — there is nothing to score.', 'warn');
+    return;
+  }
+
+  const { scores } = season.simulateWeek(week);
+  toast(`Week ${week} simulated — ${scores.length} player scores.`, 'success');
+
+  try {
+    await seasonRepo.simulateWeek(week, scores);
+  } catch (error) {
+    toast(`Week ${week} saved locally only: ${error.message}`, 'warn');
+  }
+}
+
+/** Plays every unplayed week up to and including `week`. */
+async function simulateThrough(week) {
+  const pending = season.weekNumbers.filter((w) => w <= week && !season.isWeekPlayed(w));
+  if (pending.length === 0) {
+    toast(`Weeks 1-${week} are already final.`, 'info');
+    return;
+  }
+  for (const w of pending) {
+    // eslint-disable-next-line no-await-in-loop
+    await simulateWeek(w);
+  }
+  toast(`Simulated ${pending.length} week${pending.length === 1 ? '' : 's'} through week ${week}.`, 'success');
+}
+
+/** Rolls the whole season back to unplayed — the schedule itself is kept. */
+async function resetSeason() {
+  season.resetSeason();
+  ui.week = 1;
+  toast('Season reset — every week is back to unplayed.', 'info');
+  try {
+    await seasonRepo.resetSeason();
+  } catch {
+    /* local mirror already updated by onSeasonChange */
+  }
+}
+
 /* ---------------------------------------------------------------- routing */
 
 function onRouteChange({ name }) {
@@ -180,6 +298,7 @@ function onRouteChange({ name }) {
 function refreshView() {
   if (ui.route === 'home') views.home?.render();
   else if (ui.route === 'league') views.league?.render();
+  else if (ui.route === 'matchups') views.matchups?.render();
   else if (ui.route === 'team') views.team?.render();
 }
 
@@ -282,6 +401,9 @@ function bindEvents() {
   dom.btnReset.addEventListener('click', () => {
     simulation.cancel = true;
     engine.reset();
+    // Resetting the draft empties every roster, so the scores those rosters
+    // produced no longer mean anything — the season goes back to unplayed too.
+    resetSeason();
     ui.selectedPlayerId = null;
     ui.search = '';
     ui.position = 'ALL';
@@ -404,4 +526,4 @@ if (document.readyState === 'loading') {
 }
 
 // Exposed for console tinkering / integration tests.
-window.FSN = { engine, repo, ui, get router() { return router; } };
+window.FSN = { engine, season, repo, seasonRepo, ui, get router() { return router; } };

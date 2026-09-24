@@ -2,7 +2,8 @@
 
 A zero-build, deploy-anywhere fantasy football platform: a 12-team / 15-round
 snake draft room with VOR valuations, a live pick clock with auto-draft on
-expiry, bot managers, and Postgres-backed persistence on Supabase.
+expiry, bot managers, a 14-week season with a head-to-head scoreboard, and
+Postgres-backed persistence on Supabase.
 
 Everything is static — open `index.html` through any web server (or drop the
 folder on [Vercel Drop](https://vercel.com/new/drop)) and it runs.
@@ -10,8 +11,8 @@ folder on [Vercel Drop](https://vercel.com/new/drop)) and it runs.
 ## Navigation flow
 
 ```
-Home Dashboard  ->  League Overview  ->  Draft Room / Board  ->  Team Roster / Matchup
-     #/                 #/league              #/draft                 #/team/:id
+Home Dashboard -> League Overview -> Draft Room -> Matchup / Scoreboard -> Team Roster
+      #/              #/league          #/draft        #/matchups           #/team/:id
 ```
 
 A hash router (`js/router.js`) swaps `<section data-view>` panes, so each screen
@@ -20,9 +21,11 @@ is its own module and the draft engine stays a single shared instance.
 | Route | Screen | What it shows |
 | --- | --- | --- |
 | `#/` | Home Dashboard | Draft status, your next pick, roster fill, team VOR, latest picks |
-| `#/league` | League Overview | Settings, live standings by projected starter points, per-team position counts |
+| `#/league` | League Overview | Settings, W-L / Points For / Points Against standings, roster composition |
 | `#/draft` | Draft Room | Board grid, pick clock, next-up strip, player pool, roster panel, recommendations |
-| `#/team/:id` | Team Roster / Matchup | Starters + bench, head-to-head projection, that team's draft log |
+| `#/matchups` | Matchup / Scoreboard | Week selector 1-14, side-by-side lineups, win probability, all 6 games |
+| `#/matchups/:week` | Matchup / Scoreboard | The same hub, deep-linked to one week |
+| `#/team/:id` | Team Roster | Starters + bench, that week's game, that team's draft log |
 
 ## Project structure
 
@@ -35,15 +38,19 @@ js/playerData.js        The player pool (compact tuples -> Player objects)
 js/vorMath.js           Replacement levels, VOR, tiers, derived ADP, scarcity, recommendations
 js/draftTimer.js        The pick clock (injectable scheduler so tests run instantly)
 js/draftEngine.js       Snake state machine: pick progression, clock expiry, bots, undo, hydrate
-js/persistence.js       DraftRepository — Supabase RPC writes, retry queue, localStorage mirror
+js/seasonEngine.js      Round-robin schedule, weekly score engine, W-L / PF / PA standings
+js/nflTeams.js          NFL colours, logo URLs and the synthetic weekly opponent slate
+js/persistence.js       DraftRepository + SeasonRepository — Supabase RPCs, localStorage mirror
 js/router.js            Hash router for the app shell
 js/uiRenderer.js        Draft-room rendering + shared view helpers
 js/views/home.js        Home Dashboard
-js/views/league.js      League Overview
-js/views/team.js        Team Roster / Matchup
+js/views/league.js      League Overview (season standings + roster composition)
+js/views/matchup.js     Matchup / Scoreboard hub
+js/views/team.js        Team Roster
 js/app.js               Boot, state restore, event wiring, control handlers
-supabase/migrations/    The two migrations applied to the database
-tests/engine.test.mjs   28 assertions: snake order, clock expiry, rosters, hydration
+supabase/migrations/    The three migrations applied to the database
+tests/engine.test.mjs   41 assertions: snake order, clock expiry, rosters, hydration
+tests/season.test.mjs   42 assertions: schedule, simulation, standings, hydration
 tests/draft-sim.test.mjs Full 15-round simulation + optional database round-trip
 ```
 
@@ -108,12 +115,111 @@ under the franchise that actually owns it.
 The scheduler is injectable, so the test-suite drives expiry synchronously
 instead of waiting on real seconds.
 
+## The season: 14 weeks, 84 games
+
+The draft ends at pick 180 with twelve filled rosters. `js/seasonEngine.js`
+turns them into a season.
+
+```
+Weeks  1-11   the complete round robin — every team plays every other once
+Weeks 12-14   a randomised rotation — three of those same rounds, drawn by a
+              seeded shuffle, with home and away flipped for the rematch
+```
+
+Twelve teams give exactly eleven round-robin rounds (the circle method: team 1
+stays put, the other eleven rotate one seat per round), which is why weeks 1-11
+land so neatly. The closing three weeks pick rounds out of that same set rather
+than inventing new pairings, so every week is guaranteed to be a valid perfect
+matching — all twelve franchises playing, nobody twice, nobody idle.
+
+Two pure helpers own it, and both are mirrored in Postgres:
+
+```js
+lcgShuffle(count, seed)   // deterministic Fisher-Yates (Park-Miller minstd)
+roundRobinRounds(entries) // circle method -> n-1 rounds of n/2 pairs
+```
+
+```sql
+select public.fsnv2_lcg_shuffle(11, 20260208);  -- {2,10,4,1,5,3,7,0,8,9,6}
+select public.fsnv2_round_robin(12);
+select public.fsnv2_generate_schedule(:league_id);
+```
+
+The Park-Miller multiplier (16807) is small enough that `state * 16807` stays
+inside the exact-integer range of an IEEE-754 double, so JavaScript Numbers and
+Postgres bigints walk the identical stream. That is what lets the browser
+rebuild the schedule offline and still agree with the rows in the database —
+all 84 games, in the same order. `tests/season.test.mjs` pins the shuffle
+against vectors read back from Postgres, so a drift between the two fails
+there first.
+
+`fsnv2_generate_schedule` is idempotent (it returns the existing schedule
+unless `p_replace` is true) and asserts the perfect matching before it commits:
+
+```
+generated schedule is not a perfect matching (N offending team-weeks)
+```
+
+## Matchup & Scoreboard hub
+
+`#/matchups` is the Phase 1 matchup panel grown into its own screen:
+
+- **Week selector** — weeks 1-14, marking which are final.
+- **My Matchup** — the two starting lineups side by side, slot against slot
+  (QB vs QB, RB vs RB, FLEX vs FLEX), each player with their NFL team logo,
+  that week's opponent (`@ MIA`, `vs NYJ`) and projected or actual points.
+- **Live win probability** — a logistic fit to the projected margin
+  (`1 / (1 + e^(-1.702 * margin / 28))`), with the projected totals above it.
+  A finished game reports the result instead of a forecast.
+- **League Scoreboard** — all six of the week's games as a grid; clicking a
+  card opens that head-to-head.
+
+Team logos load from a CDN, and — like the Tailwind and Lucide layers — the UI
+has to survive that CDN being blocked. The logo sits on top of a chip carrying
+the team's abbreviation in its primary colour, so a failed load degrades to the
+chip instead of a broken-image icon.
+
+> The weekly NFL opponents are synthetic, exactly like the projections in
+> `playerData.js`: a 32-team round robin over the same seeded shuffle. They are
+> display context next to a player's name, never an input to scoring.
+
+## Simulate Week (the dummy score engine)
+
+The dev toolbar in the Matchup hub header drives the season without waiting on
+real games:
+
+| Control | What it does |
+| --- | --- |
+| **Simulate Week** | Scores every rostered player for the selected week |
+| **Sim Through N** | Plays every unplayed week up to the selected one |
+| **Reset Season** | Rolls every week back to unplayed, keeping the schedule |
+
+A player's weekly score is their season projection spread over 17 games, moved
+by position-weighted noise — defenses swing far harder than quarterbacks:
+
+```js
+const VOLATILITY = { QB: 0.24, RB: 0.36, WR: 0.42, TE: 0.38, K: 0.32, DST: 0.58 };
+points = max(0, (projection / 17) * (1 + VOLATILITY[pos] * noise()))
+```
+
+`noise()` is Bates(3) — the mean of three uniforms — so it is bell-shaped and
+blow-ups and busts stay rare instead of being as likely as an average week.
+
+Only the nine **starters** count toward a team's total; bench scores are
+recorded but never summed. Each simulated week writes through
+`fsnv2_simulate_week`, which stores the box score and then **re-sums the team
+totals from those rows** rather than trusting the numbers the client sent, so a
+matchup score can never drift from the box score underneath it.
+
+W-L records, Points For and Points Against on `#/league` are derived from the
+matchup rows, so every simulated week moves the table the moment it goes final.
+
 ## Database (Supabase / Postgres)
 
-Applied to the Supabase project **FSN** as `fsnv2_draft_engine_schema` and
-`fsnv2_draft_engine_rpc` (checked in under `supabase/migrations/`). Tables live
-in a dedicated `fsnv2` schema so they never collide with the existing
-`public.*` tables.
+Applied to the Supabase project **FSN** as `fsnv2_draft_engine_schema`,
+`fsnv2_draft_engine_rpc` and `fsnv2_season_matchups` (checked in under
+`supabase/migrations/`). Tables live in a dedicated `fsnv2` schema so they
+never collide with the existing `public.*` tables.
 
 | Table | Columns |
 | --- | --- |
@@ -121,10 +227,18 @@ in a dedicated `fsnv2` schema so they never collide with the existing
 | `fsnv2.drafts` | `id`, `league_id`, `current_pick`, `status`, `timer_seconds`, `rounds`, `draft_type`, `teams` (jsonb), timestamps |
 | `fsnv2.draft_picks` | `id`, `draft_id`, `pick_number`, `round`, `team_id`, `player_id`, `picked_at`, `auto`, `source` |
 | `fsnv2.players` | `id`, `name`, `position`, `team`, `adp`, `stats` (jsonb), timestamps |
+| `fsnv2.matchups` | `id`, `league_id`, `week`, `team_a_id`, `team_b_id`, `team_a_score`, `team_b_score`, `status` |
+| `fsnv2.player_week_scores` | `id`, `league_id`, `week`, `team_id`, `player_id`, `slot`, `starter`, `projected`, `points` |
 
 Constraints that keep a board honest: `unique (draft_id, pick_number)`,
 `unique (draft_id, player_id)`, and a FK from `draft_picks.player_id` to
-`players.id`.
+`players.id`. `matchups` adds `team_a_id <> team_b_id` plus a unique constraint
+on each side per week; `fsnv2_generate_schedule` is the only writer and asserts
+the full perfect matching before committing.
+
+`player_week_scores` deliberately carries **no** FK to `fsnv2.players`: the
+projection pool syncs asynchronously on boot, and a slow sync must never be
+able to reject a simulated week.
 
 RLS is enabled with **no** direct-table policies. The browser only ever calls
 security-definer RPCs in `public`:
@@ -137,6 +251,11 @@ security-definer RPCs in `public`:
 | `fsnv2_record_pick(draft, pick_number, player_id[, team_id, auto, source])` | **validates and persists one pick** |
 | `fsnv2_undo_pick` / `fsnv2_reset_draft` | rewind |
 | `fsnv2_draft_state(draft)` / `fsnv2_players(limit)` / `fsnv2_leagues()` | reads |
+| `fsnv2_lcg_shuffle(count, seed)` / `fsnv2_round_robin(teams)` | canonical schedule math |
+| `fsnv2_generate_schedule(league[, weeks, seed, replace])` | **builds the 14 weeks**, idempotent |
+| `fsnv2_simulate_week(league, week, scores)` | stores a box score and re-sums the team totals |
+| `fsnv2_reset_season(league[, week])` | rolls a week — or the season — back to unplayed |
+| `fsnv2_matchups` / `fsnv2_season_standings` / `fsnv2_season_state` | reads |
 
 `fsnv2_record_pick` re-derives the round and team from `pick_number` inside the
 transaction and raises on anything inconsistent, so a buggy client cannot write
@@ -156,13 +275,17 @@ app restores from the database first, then localStorage, then a fresh room.
 ### Configuration
 
 `js/config.js` carries the project URL and the **publishable** key (safe in the
-browser — it only reaches the RPCs above). Override without editing the file:
+browser — it only reaches the RPCs above), plus the season length and schedule
+seed. `season.seed` must match `p_seed` in `fsnv2_generate_schedule` or the
+browser and the database will disagree about weeks 12-14. Override without
+editing the file:
 
 ```html
 <script>
   window.FSN_CONFIG = {
     supabase: { url: 'https://<project>.supabase.co', key: 'sb_publishable_…' },
-    league:   { name: 'My League', totalTeams: 12, rounds: 15, timerSeconds: 60 }
+    league:   { name: 'My League', totalTeams: 12, rounds: 15, timerSeconds: 60 },
+    season:   { weeks: 14, seed: 20260208 }
   };
 </script>
 ```
@@ -181,14 +304,24 @@ npm run dev            # python3 -m http.server 8000
 ## Tests
 
 ```bash
-npm test               # engine suite + full 15-round simulation
+npm test               # engine + season suites, then the full 15-round simulation
+npm run test:engine    # draft engine only
+npm run test:season    # season matchup engine only
 npm run test:db        # also persist the simulation to Supabase and verify
 ```
 
-`tests/engine.test.mjs` (28 assertions) covers snake rotation across 15 rounds
+`tests/engine.test.mjs` (41 assertions) covers snake rotation across 15 rounds
 and odd team counts, on-the-clock indexing through the turn, next-up previews,
 clock expiry (ADP pick, clean advance, single fire), full-draft roster legality,
 undo and hydration.
+
+`tests/season.test.mjs` (42 assertions) covers the schedule — 84 games, six a
+week, every team once a week, all 66 pairings exactly once across weeks 1-11,
+weeks 12-14 as valid perfect matchings with the sides swapped — the shuffle
+vectors read back from Postgres, the score engine (totals equal the sum of the
+starters; scores sit near but not on the projection), the standings invariants
+(wins balance losses, league Points For equals Points Against) and the
+persistence round trip.
 
 `tests/draft-sim.test.mjs` drafts all 180 picks — alternating VOR bot picks and
 simulated clock expiries — prints the board by round, verifies the order, and
