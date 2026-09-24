@@ -1,9 +1,12 @@
 /**
  * uiRenderer.js
  * -----------------------------------------------------------------------------
- * Pure-ish DOM rendering layer. Every function takes the engine plus the UI
- * state object and rewrites a single region of the page, so the view is always
- * a function of state and never drifts out of sync with the draft.
+ * Rendering layer for the draft room. Every function takes the engine plus the
+ * UI state object and rewrites a single region, so the view is always a pure
+ * function of state and can never drift out of sync with the draft.
+ *
+ * Shared helpers (badges, roster slot rows, escaping) are exported for the
+ * Dashboard / League / Team views in js/views/.
  */
 
 import { POSITIONS, ROSTER_SLOTS } from './types.js';
@@ -12,15 +15,16 @@ import { positionalScarcity } from './vorMath.js';
 /** Cached element lookups. */
 export const dom = {};
 
-/** Grab every element the renderer touches, once. */
+/** Grab every element the draft room touches, once. */
 export function cacheDom() {
   const ids = [
-    'onClockTeam', 'onClockMeta', 'roundLabel', 'pickLabel', 'progressBar', 'progressText',
-    'draftBoard', 'playerPool', 'poolCount', 'playerSearch', 'positionFilters', 'sortSelect',
-    'rosterTeamSelect', 'rosterSlots', 'rosterNeeds', 'recommendations', 'recentPicks',
-    'selectionName', 'selectionMeta', 'btnMakePick', 'btnAutoPick', 'btnSimRound',
+    'onClockTeam', 'onClockMeta', 'clockEyebrow', 'roundLabel', 'pickLabel', 'progressBar',
+    'progressText', 'draftBoard', 'playerPool', 'poolCount', 'playerSearch', 'positionFilters',
+    'sortSelect', 'rosterTeamSelect', 'rosterSlots', 'rosterNeeds', 'recommendations',
+    'recentPicks', 'selectionName', 'selectionMeta', 'btnMakePick', 'btnAutoPick', 'btnSimRound',
     'btnSimToMe', 'btnUndo', 'btnReset', 'toggleAutoDraft', 'toast', 'scarcityList',
-    'hideDraftedWrap', 'boardStatus', 'clockEyebrow'
+    'hideDraftedWrap', 'boardStatus', 'clockTime', 'clockRing', 'pickClock', 'btnClockToggle',
+    'nextUpList', 'syncPill', 'syncLabel'
   ];
   ids.forEach((id) => {
     dom[id] = document.getElementById(id);
@@ -36,13 +40,13 @@ export function refreshIcons() {
 /* ------------------------------------------------------------------ header */
 
 export function renderHeader(engine, ui) {
-  const team = engine.teams.find((t) => t.id === engine.currentTeamId);
-  const userTeam = engine.teams.find((t) => t.id === engine.userTeamId);
+  const team = engine.currentTeam;
+  const userTeam = engine.teamById(engine.userTeamId);
   const picksAway = engine.picksUntilTurn(engine.userTeamId);
 
   dom.onClockTeam.textContent = engine.complete ? 'Draft Complete' : team.name;
+  dom.onClockTeam.classList.toggle('is-user', !engine.complete && team.isUser);
   dom.clockEyebrow.hidden = engine.complete;
-  dom.onClockTeam.classList.toggle('text-brand-400', !engine.complete && team.isUser);
 
   if (engine.complete) {
     dom.onClockMeta.textContent = `All ${engine.totalPicks} picks are in — rosters are final.`;
@@ -69,6 +73,55 @@ export function renderHeader(engine, ui) {
   dom.btnSimToMe.disabled = engine.complete;
   dom.toggleAutoDraft.setAttribute('aria-pressed', String(engine.autoDraftUser));
   dom.toggleAutoDraft.classList.toggle('is-active', engine.autoDraftUser);
+
+  renderClock(engine);
+  renderNextUp(engine);
+}
+
+/** Pick clock: countdown ring + remaining seconds. */
+export function renderClock(engine) {
+  const timer = engine.clock;
+  const circumference = 2 * Math.PI * 19;
+  dom.clockTime.textContent = engine.complete ? '—' : timer.display;
+  dom.clockRing.style.strokeDasharray = `${circumference}`;
+  dom.clockRing.style.strokeDashoffset = `${circumference * (1 - timer.fraction)}`;
+
+  const urgent = timer.running && timer.remaining <= 10;
+  dom.pickClock.classList.toggle('is-urgent', urgent);
+  dom.pickClock.classList.toggle('is-running', timer.running);
+  dom.btnClockToggle.innerHTML = `<i data-lucide="${timer.running ? 'pause' : 'play'}"></i>`;
+  dom.btnClockToggle.disabled = engine.complete;
+}
+
+/** "Next up" strip — recomputed from snake order on every pick. */
+export function renderNextUp(engine) {
+  const preview = engine.nextUp(4);
+  dom.nextUpList.innerHTML = preview.length
+    ? preview
+        .map(
+          (row) => `
+      <li class="next-up__item${row.isUser ? ' is-user' : ''}">
+        <span class="next-up__pick">${row.round}.${String(row.slot).padStart(2, '0')}</span>
+        <span class="next-up__team">${escapeHtml(row.team.abbr)}</span>
+      </li>`
+        )
+        .join('')
+    : '<li class="next-up__item is-empty">Board complete</li>';
+}
+
+/** Database sync indicator in the nav bar. */
+export function renderSyncStatus({ status, pending = 0, error = null }) {
+  if (!dom.syncPill) return;
+  const labels = {
+    idle: 'db ready',
+    syncing: pending ? `syncing ${pending}` : 'syncing',
+    synced: 'db synced',
+    offline: 'local only',
+    error: 'sync error'
+  };
+  dom.syncLabel.textContent = labels[status] || status;
+  dom.syncPill.className = `sync-pill is-${status}`;
+  dom.syncPill.title = error || `Supabase persistence: ${labels[status] || status}`;
 }
 
 /* -------------------------------------------------------------- draft board */
@@ -90,8 +143,7 @@ export function renderBoard(engine, ui) {
   });
 
   for (let round = 1; round <= rounds; round += 1) {
-    const label = boardCell('board-round', `R${round}`);
-    frag.appendChild(label);
+    frag.appendChild(boardCell('board-round', `R${round}`));
 
     for (let slot = 1; slot <= teamCount; slot += 1) {
       const overall = (round - 1) * teamCount + slot;
@@ -107,7 +159,7 @@ export function renderBoard(engine, ui) {
         const player = engine.playersById[pick.playerId];
         cell.classList.add('is-filled', `pos-${player.position.toLowerCase()}`);
         cell.innerHTML = `
-          <span class="board-cell__meta">${overall}.${pick.auto ? ' AUTO' : ''}</span>
+          <span class="board-cell__meta">${overall}.${pick.source === 'timer_expiry' ? ' ⏱' : pick.auto ? ' AUTO' : ''}</span>
           <span class="board-cell__name">${escapeHtml(shortName(player.name))}</span>
           <span class="board-cell__pos">${player.position} · ${player.team}</span>`;
       } else if (overall === engine.currentPick && !engine.complete) {
@@ -115,7 +167,7 @@ export function renderBoard(engine, ui) {
         cell.innerHTML = `
           <span class="board-cell__meta">${overall}</span>
           <span class="board-cell__name">ON THE CLOCK</span>
-          <span class="board-cell__pos">${engine.teams.find((t) => t.id === teamId).abbr}</span>`;
+          <span class="board-cell__pos">${engine.teamById(teamId).abbr}</span>`;
       } else {
         cell.innerHTML = `<span class="board-cell__meta">${overall}</span>`;
       }
@@ -179,12 +231,10 @@ export function renderPool(engine, ui) {
     row.classList.toggle('is-drafted', player.draftedBy !== null);
     row.disabled = player.draftedBy !== null;
 
-    const owner = player.draftedBy
-      ? engine.teams.find((t) => t.id === player.draftedBy).abbr
-      : null;
+    const owner = player.draftedBy ? engine.teamById(player.draftedBy).abbr : null;
 
     row.innerHTML = `
-      <span class="badge badge--${player.position.toLowerCase()}">${player.position}</span>
+      ${badge(player.position)}
       <span class="player-row__main">
         <span class="player-row__name">${escapeHtml(player.name)}</span>
         <span class="player-row__meta">${player.team} · ${player.position}${player.posRank} · Tier ${player.tier} · ADP ${player.adp}</span>
@@ -223,24 +273,35 @@ export function renderPool(engine, ui) {
 
 /* ------------------------------------------------------------------ rosters */
 
-export function renderRosterSelect(engine, ui) {
+export function renderTeamOptions(select, engine, selectedId) {
   const frag = document.createDocumentFragment();
   engine.teams.forEach((team) => {
     const option = document.createElement('option');
     option.value = String(team.id);
     option.textContent = `${team.name}${team.isUser ? ' (You)' : ''}`;
-    option.selected = team.id === ui.selectedTeamId;
+    option.selected = team.id === Number(selectedId);
     frag.appendChild(option);
   });
-  dom.rosterTeamSelect.replaceChildren(frag);
+  select.replaceChildren(frag);
 }
 
-export function renderRoster(engine, ui) {
-  const teamId = ui.selectedTeamId;
+export function renderRosterSelect(engine, ui) {
+  renderTeamOptions(dom.rosterTeamSelect, engine, ui.selectedTeamId);
+}
+
+/**
+ * Renders roster slot rows into any container.
+ * @param {HTMLElement} container
+ * @param {'all'|'starters'|'bench'} scope
+ */
+export function renderSlots(container, engine, teamId, scope = 'all') {
   const roster = engine.rosterFor(teamId);
+  const slots = ROSTER_SLOTS.filter((slot) =>
+    scope === 'all' ? true : scope === 'starters' ? slot.starter : !slot.starter
+  );
   const frag = document.createDocumentFragment();
 
-  ROSTER_SLOTS.forEach((slot) => {
+  slots.forEach((slot) => {
     const playerId = roster[slot.key];
     const player = playerId ? engine.playersById[playerId] : null;
     const row = document.createElement('div');
@@ -250,33 +311,28 @@ export function renderRoster(engine, ui) {
       ${
         player
           ? `<span class="roster-slot__player">
-               <span class="badge badge--${player.position.toLowerCase()} badge--sm">${player.position}</span>
+               ${badge(player.position, true)}
                <span class="roster-slot__name">${escapeHtml(player.name)}</span>
                <span class="roster-slot__team">${player.team}</span>
              </span>
              <span class="roster-slot__pts">${player.projection}</span>`
-          : `<span class="roster-slot__player roster-slot__player--empty">Empty</span><span class="roster-slot__pts">—</span>`
+          : '<span class="roster-slot__player roster-slot__player--empty">Empty</span><span class="roster-slot__pts">—</span>'
       }`;
     frag.appendChild(row);
   });
-  dom.rosterSlots.replaceChildren(frag);
+  container.replaceChildren(frag);
+}
 
-  // Starter points + positional counts.
+export function renderRoster(engine, ui) {
+  const teamId = ui.selectedTeamId;
+  renderSlots(dom.rosterSlots, engine, teamId, 'all');
+
   const counts = engine.positionCounts(teamId);
-  const starterPoints = ROSTER_SLOTS.filter((s) => s.starter).reduce((sum, slot) => {
-    const id = roster[slot.key];
-    return sum + (id ? engine.playersById[id].projection : 0);
-  }, 0);
-  const totalVor = engine.teams
-    .find((t) => t.id === teamId)
-    .roster.reduce((sum, id) => sum + engine.playersById[id].vor, 0);
-
   dom.rosterNeeds.innerHTML = `
-    <div class="stat"><span class="stat__label">Starter Pts</span><span class="stat__value">${Math.round(starterPoints)}</span></div>
-    <div class="stat"><span class="stat__label">Total VOR</span><span class="stat__value">${formatVor(round1(totalVor))}</span></div>
+    <div class="stat"><span class="stat__label">Starter Pts</span><span class="stat__value">${Math.round(engine.starterPoints(teamId))}</span></div>
+    <div class="stat"><span class="stat__label">Total VOR</span><span class="stat__value">${formatVor(engine.teamVor(teamId))}</span></div>
     ${POSITIONS.map(
-      (pos) =>
-        `<div class="stat stat--pos"><span class="badge badge--${pos.toLowerCase()} badge--sm">${pos}</span><span class="stat__value">${counts[pos]}</span></div>`
+      (pos) => `<div class="stat stat--pos">${badge(pos, true)}<span class="stat__value">${counts[pos]}</span></div>`
     ).join('')}`;
 }
 
@@ -294,7 +350,7 @@ export function renderRecommendations(engine, ui) {
     row.dataset.playerId = player.id;
     row.innerHTML = `
       <span class="rec-row__rank">${index + 1}</span>
-      <span class="badge badge--${player.position.toLowerCase()} badge--sm">${player.position}</span>
+      ${badge(player.position, true)}
       <span class="rec-row__name">${escapeHtml(player.name)}</span>
       <span class="rec-row__score">${formatVor(score)}</span>`;
     frag.appendChild(row);
@@ -308,12 +364,11 @@ export function renderRecommendations(engine, ui) {
   }
   dom.recommendations.replaceChildren(frag);
 
-  const scarcity = positionalScarcity(engine.availablePlayers);
-  dom.scarcityList.innerHTML = scarcity
+  dom.scarcityList.innerHTML = positionalScarcity(engine.availablePlayers)
     .map(
       (row) => `
       <li class="scarcity">
-        <span class="badge badge--${row.position.toLowerCase()} badge--sm">${row.position}</span>
+        ${badge(row.position, true)}
         <span class="scarcity__bar"><span style="width:${Math.min(100, row.depthToReplacement * 4)}%"></span></span>
         <span class="scarcity__count">${row.depthToReplacement} startable</span>
       </li>`
@@ -321,25 +376,26 @@ export function renderRecommendations(engine, ui) {
     .join('');
 }
 
-export function renderRecentPicks(engine) {
-  const recent = [...engine.picks].slice(-14).reverse();
-  dom.recentPicks.innerHTML = recent
+/** Pick feed — reused by the draft room and the dashboard. */
+export function pickFeedHtml(engine, picks) {
+  if (picks.length === 0) return '<li class="empty-state">No picks yet — start the draft.</li>';
+  return picks
     .map((pick) => {
       const player = engine.playersById[pick.playerId];
-      const team = engine.teams.find((t) => t.id === pick.teamId);
+      const team = engine.teamById(pick.teamId);
       return `
         <li class="feed-item">
           <span class="feed-item__pick">${pick.round}.${String(pick.slot).padStart(2, '0')}</span>
-          <span class="badge badge--${player.position.toLowerCase()} badge--sm">${player.position}</span>
+          ${badge(player.position, true)}
           <span class="feed-item__name">${escapeHtml(player.name)}</span>
-          <span class="feed-item__team">${team.abbr}</span>
+          <span class="feed-item__team">${team.abbr}${pick.source === 'timer_expiry' ? ' ⏱' : ''}</span>
         </li>`;
     })
     .join('');
+}
 
-  if (recent.length === 0) {
-    dom.recentPicks.innerHTML = '<li class="empty-state">No picks yet — start the draft.</li>';
-  }
+export function renderRecentPicks(engine) {
+  dom.recentPicks.innerHTML = pickFeedHtml(engine, [...engine.picks].slice(-14).reverse());
 }
 
 /* -------------------------------------------------------------------- misc */
@@ -349,12 +405,10 @@ export function toast(message, tone = 'info') {
   dom.toast.textContent = message;
   dom.toast.className = `toast toast--${tone} is-visible`;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => {
-    dom.toast.classList.remove('is-visible');
-  }, 2600);
+  toastTimer = setTimeout(() => dom.toast.classList.remove('is-visible'), 2600);
 }
 
-/** Full repaint. */
+/** Full repaint of the draft room. */
 export function renderAll(engine, ui) {
   renderHeader(engine, ui);
   renderBoard(engine, ui);
@@ -365,22 +419,24 @@ export function renderAll(engine, ui) {
   refreshIcons();
 }
 
-function shortName(name) {
+/* ------------------------------------------------------------- helpers ---- */
+
+export function badge(position, small = false) {
+  return `<span class="badge badge--${position.toLowerCase()}${small ? ' badge--sm' : ''}">${position}</span>`;
+}
+
+export function shortName(name) {
   const parts = name.split(' ');
   if (parts.length === 1) return name;
   if (name.includes('D/ST')) return parts.slice(0, -1).join(' ');
   return `${parts[0][0]}. ${parts.slice(1).join(' ')}`;
 }
 
-function formatVor(value) {
+export function formatVor(value) {
   return `${value > 0 ? '+' : ''}${value}`;
 }
 
-function round1(value) {
-  return Math.round(value * 10) / 10;
-}
-
-function escapeHtml(value) {
+export function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (char) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
   }[char]));

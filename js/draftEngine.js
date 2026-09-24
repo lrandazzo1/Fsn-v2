@@ -1,11 +1,22 @@
 /**
  * draftEngine.js
  * -----------------------------------------------------------------------------
- * Authoritative state manager for a 12-team, 15-round snake draft.
+ * Authoritative state manager for a snake draft (12 teams x 15 rounds by
+ * default).
  *
- * The engine owns all mutations (pick, auto-pick, undo, reset) and emits a
- * `change` event afterwards. The UI layer only ever reads from it, which keeps
- * rendering a pure function of state.
+ * Snake rotation
+ * --------------
+ *   Round 1 (odd)  -> teams 1, 2, 3 ... 12
+ *   Round 2 (even) -> teams 12, 11, 10 ... 1
+ *   Round 3 (odd)  -> teams 1, 2, 3 ... 12
+ *
+ * `teamIdForPick()` is the single source of truth for that mapping; the board,
+ * the "on the clock" indicator, the next-up previews and the Postgres function
+ * `public.fsnv2_snake_team()` all derive from the same formula, so the client
+ * and the database can never disagree about whose pick it is.
+ *
+ * The engine owns every mutation (pick, auto-pick, clock expiry, undo, reset)
+ * and emits events afterwards, which keeps rendering a pure function of state.
  */
 
 import {
@@ -20,13 +31,20 @@ import {
 } from './types.js';
 import { draftValue, enrichPlayers, recommendPlayers } from './vorMath.js';
 import { loadPlayers } from './playerData.js';
+import { PickTimer } from './draftTimer.js';
 
 const DEFAULTS = {
   teamCount: 12,
   rounds: 15,
   userTeamId: 1,
+  /** Pick clock length in seconds. */
+  timerSeconds: 60,
+  /** Start the clock automatically as soon as the draft begins. */
+  autoStartClock: false,
   /** Higher = more chaotic bots. 0 = always takes the top board value. */
-  botRandomness: 0.18
+  botRandomness: 0.18,
+  /** Injected into PickTimer so tests can drive the clock synchronously. */
+  scheduler: undefined
 };
 
 export class DraftEngine {
@@ -37,14 +55,25 @@ export class DraftEngine {
     this.config = { ...DEFAULTS, ...options };
     /** @type {Map<string, Function[]>} */
     this.listeners = new Map();
-    this.reset();
+
+    this.clock = new PickTimer({
+      seconds: this.config.timerSeconds,
+      scheduler: this.config.scheduler,
+      onTick: (remaining) => this.emit('tick', { remaining, timer: this.clock }),
+      onExpire: () => this.handleClockExpiry()
+    });
+
+    this.reset({ silent: true });
+    this.emit('change', { reason: 'init' });
   }
 
   // ---------------------------------------------------------------- lifecycle
 
   /** Rebuilds a fresh draft with the current configuration. */
-  reset() {
+  reset({ silent = false } = {}) {
     const { teamCount, rounds, userTeamId, players } = this.config;
+
+    this.clock.stop();
 
     const pool = enrichPlayers(players ? clonePlayers(players) : loadPlayers(), teamCount);
 
@@ -72,7 +101,8 @@ export class DraftEngine {
     this.complete = false;
     this.autoDraftUser = false;
 
-    this.emit('change', { reason: 'reset' });
+    if (!silent) this.emit('change', { reason: 'reset' });
+    if (this.config.autoStartClock && !silent) this.startClock();
   }
 
   // ------------------------------------------------------------------ getters
@@ -89,6 +119,10 @@ export class DraftEngine {
     return this.config.userTeamId;
   }
 
+  get timerSeconds() {
+    return this.config.timerSeconds;
+  }
+
   /** All players still on the board. */
   get availablePlayers() {
     return Object.values(this.playersById).filter((p) => p.draftedBy === null);
@@ -96,7 +130,12 @@ export class DraftEngine {
 
   /** 1-based round for the pick currently on the clock. */
   get currentRound() {
-    return Math.min(this.rounds, Math.floor((this.currentPick - 1) / this.teamCount) + 1);
+    return this.roundForPick(this.currentPick);
+  }
+
+  /** 1-based position inside the current round (1..teamCount). */
+  get currentSlot() {
+    return ((this.currentPick - 1) % this.teamCount) + 1;
   }
 
   /** Team id on the clock (snake order). */
@@ -104,12 +143,27 @@ export class DraftEngine {
     return this.teamIdForPick(this.currentPick);
   }
 
+  /** The Team object on the clock. */
+  get currentTeam() {
+    return this.teamById(this.currentTeamId);
+  }
+
   get isUserOnClock() {
     return !this.complete && this.currentTeamId === this.userTeamId;
   }
 
+  teamById(teamId) {
+    return this.teams.find((team) => team.id === teamId);
+  }
+
+  /** @param {number} overall 1-based overall pick */
+  roundForPick(overall) {
+    return Math.min(this.rounds, Math.floor((overall - 1) / this.teamCount) + 1);
+  }
+
   /**
    * Snake order: odd rounds run 1..N, even rounds run N..1.
+   * Mirrors public.fsnv2_snake_team() in Postgres.
    * @param {number} overall 1-based overall pick
    * @returns {number} team id
    */
@@ -118,6 +172,27 @@ export class DraftEngine {
     const round = Math.floor(index / this.teamCount);
     const slot = index % this.teamCount;
     return round % 2 === 0 ? slot + 1 : this.teamCount - slot;
+  }
+
+  /**
+   * The next `count` picks after the one on the clock — drives the "next up"
+   * strip so previews stay in sync with every selection.
+   * @returns {Array<{overall: number, round: number, slot: number, teamId: number, team: import('./types.js').Team, isUser: boolean}>}
+   */
+  nextUp(count = 4) {
+    const preview = [];
+    for (let overall = this.currentPick + 1; overall <= this.totalPicks && preview.length < count; overall += 1) {
+      const teamId = this.teamIdForPick(overall);
+      preview.push({
+        overall,
+        round: this.roundForPick(overall),
+        slot: ((overall - 1) % this.teamCount) + 1,
+        teamId,
+        team: this.teamById(teamId),
+        isUser: teamId === this.userTeamId
+      });
+    }
+    return preview;
   }
 
   /** @returns {import('./types.js').Pick|undefined} */
@@ -141,6 +216,67 @@ export class DraftEngine {
     return next === undefined ? Infinity : next - this.currentPick;
   }
 
+  // ------------------------------------------------------------------- clock
+
+  /** (Re)starts the pick clock for whoever is on the clock. */
+  startClock(seconds = this.config.timerSeconds) {
+    if (this.complete) return this.clock;
+    this.clock.start(seconds);
+    this.emit('clock', { state: 'started', timer: this.clock });
+    return this.clock;
+  }
+
+  pauseClock() {
+    this.clock.pause();
+    this.emit('clock', { state: 'paused', timer: this.clock });
+    return this.clock;
+  }
+
+  resumeClock() {
+    this.clock.resume();
+    this.emit('clock', { state: 'resumed', timer: this.clock });
+    return this.clock;
+  }
+
+  stopClock() {
+    this.clock.stop();
+    this.emit('clock', { state: 'stopped', timer: this.clock });
+    return this.clock;
+  }
+
+  /**
+   * Fired by PickTimer at 0:00 — takes the best available player by ADP and
+   * advances the turn cleanly (the clock restarts for the next team inside
+   * makePick()).
+   */
+  handleClockExpiry() {
+    if (this.complete) return null;
+    const player = this.bestAvailableByAdp();
+    if (!player) return null;
+    const pick = this.makePick(player.id, { auto: true, source: 'timer_expiry' });
+    this.emit('expire', { pick, player });
+    return pick;
+  }
+
+  /**
+   * Best player left by draft position — lowest ADP number, i.e. the highest
+   * ADP-ranked player still on the board. Prefers players who actually fit an
+   * open roster slot, falling back to raw ADP if the roster shape blocks all of
+   * them.
+   * @param {number} [teamId] defaults to the team on the clock
+   */
+  bestAvailableByAdp(teamId = this.currentTeamId) {
+    const available = this.availablePlayers.sort((a, b) => a.adp - b.adp);
+    if (available.length === 0) return null;
+    const counts = this.positionCounts(teamId);
+    const fits = available.find(
+      (player) =>
+        counts[player.position] < POSITION_LIMITS[player.position] &&
+        this.findOpenSlot(teamId, player.position)
+    );
+    return fits || available.find((player) => this.findOpenSlot(teamId, player.position)) || null;
+  }
+
   // -------------------------------------------------------------- roster math
 
   /** @returns {Record<string, string|null>} slot key -> player id */
@@ -151,11 +287,9 @@ export class DraftEngine {
   /** Counts of rostered players by position for a team. */
   positionCounts(teamId) {
     const counts = POSITIONS.reduce((acc, pos) => ({ ...acc, [pos]: 0 }), {});
-    this.teams
-      .find((t) => t.id === teamId)
-      .roster.forEach((playerId) => {
-        counts[this.playersById[playerId].position] += 1;
-      });
+    this.teamById(teamId).roster.forEach((playerId) => {
+      counts[this.playersById[playerId].position] += 1;
+    });
     return counts;
   }
 
@@ -172,6 +306,36 @@ export class DraftEngine {
     if (starter) return starter.key;
     const bench = ROSTER_SLOTS.find((slot) => !slot.starter && roster[slot.key] === null);
     return bench ? bench.key : null;
+  }
+
+  /** Projected points from the current starting lineup. */
+  starterPoints(teamId) {
+    const roster = this.rosters[teamId];
+    return ROSTER_SLOTS.filter((slot) => slot.starter).reduce((sum, slot) => {
+      const id = roster[slot.key];
+      return sum + (id ? this.playersById[id].projection : 0);
+    }, 0);
+  }
+
+  /** Summed VOR of everyone a team has rostered. */
+  teamVor(teamId) {
+    return round1(
+      this.teamById(teamId).roster.reduce((sum, id) => sum + this.playersById[id].vor, 0)
+    );
+  }
+
+  /** League table sorted by starter points — powers the League Overview view. */
+  standings() {
+    return this.teams
+      .map((team) => ({
+        team,
+        picks: team.roster.length,
+        starterPoints: Math.round(this.starterPoints(team.id)),
+        vor: this.teamVor(team.id),
+        counts: this.positionCounts(team.id)
+      }))
+      .sort((a, b) => b.starterPoints - a.starterPoints)
+      .map((row, index) => ({ ...row, rank: index + 1 }));
   }
 
   /**
@@ -217,9 +381,12 @@ export class DraftEngine {
   // ---------------------------------------------------------------- selecting
 
   /**
-   * Drafts a player for the team currently on the clock.
+   * Drafts a player for the team currently on the clock, then advances the
+   * turn: current pick moves forward, the clock restarts for the next team and
+   * a `change` event repaints every on-the-clock indicator.
+   *
    * @param {string} playerId
-   * @param {{auto?: boolean}} [meta]
+   * @param {{auto?: boolean, source?: 'manual'|'bot'|'timer_expiry'|'simulation'}} [meta]
    * @returns {import('./types.js').Pick}
    */
   makePick(playerId, meta = {}) {
@@ -232,26 +399,31 @@ export class DraftEngine {
     const slotKey = this.findOpenSlot(teamId, player.position);
     if (!slotKey) throw new Error('Roster is full.');
 
-    const index = this.currentPick - 1;
     const pick = createPick({
       overall: this.currentPick,
-      round: Math.floor(index / this.teamCount) + 1,
-      slot: (index % this.teamCount) + 1,
+      round: this.currentRound,
+      slot: this.currentSlot,
       teamId,
       playerId,
       auto: Boolean(meta.auto)
     });
+    pick.source = meta.source || (meta.auto ? 'bot' : 'manual');
+    pick.slotKey = slotKey;
 
     player.draftedBy = teamId;
     player.pickNumber = pick.overall;
     this.rosters[teamId][slotKey] = playerId;
-    this.teams.find((t) => t.id === teamId).roster.push(playerId);
+    this.teamById(teamId).roster.push(playerId);
     this.picks.push(pick);
 
-    this.currentPick += 1;
-    if (this.currentPick > this.totalPicks) {
+    // --- advance the turn ----------------------------------------------------
+    if (pick.overall >= this.totalPicks) {
       this.complete = true;
       this.currentPick = this.totalPicks;
+      this.clock.stop();
+    } else {
+      this.currentPick = pick.overall + 1;
+      if (this.clock.running || this.clock.expired) this.clock.start(this.config.timerSeconds);
     }
 
     this.emit('change', { reason: 'pick', pick });
@@ -271,7 +443,7 @@ export class DraftEngine {
     const slotKey = Object.keys(roster).find((key) => roster[key] === pick.playerId);
     if (slotKey) roster[slotKey] = null;
 
-    const team = this.teams.find((t) => t.id === pick.teamId);
+    const team = this.teamById(pick.teamId);
     team.roster = team.roster.filter((id) => id !== pick.playerId);
 
     this.complete = false;
@@ -310,19 +482,20 @@ export class DraftEngine {
     return best;
   }
 
-  /** Makes one automated pick for whoever is on the clock. */
-  autoPick() {
+  /**
+   * Makes one automated pick for whoever is on the clock.
+   * @param {{strategy?: 'vor'|'adp', source?: string}} [options]
+   */
+  autoPick({ strategy = 'vor', source } = {}) {
     if (this.complete) return null;
-    const player = this.botSelection();
+    const player = strategy === 'adp' ? this.bestAvailableByAdp() : this.botSelection();
     if (!player) return null;
-    return this.makePick(player.id, { auto: true });
+    return this.makePick(player.id, { auto: true, source: source || (strategy === 'adp' ? 'timer_expiry' : 'bot') });
   }
 
   /**
    * Advances the draft until the user's team is on the clock (or the draft
-   * ends). Respects `autoDraftUser` — when enabled the user's picks are made
-   * by the bot too.
-   * @param {{maxPicks?: number}} [options]
+   * ends). Respects `autoDraftUser`.
    */
   advanceToUser({ maxPicks = this.totalPicks } = {}) {
     let made = 0;
@@ -366,16 +539,49 @@ export class DraftEngine {
     return recommendPlayers(eligible, weights, limit);
   }
 
-  /** Serialisable snapshot — handy for persistence or debugging. */
+  /**
+   * Replays a persisted pick list (from Supabase or localStorage) onto a fresh
+   * board. Picks are applied in pick_number order and anything that no longer
+   * validates is skipped, so a corrupt row can never wedge the room.
+   * @param {Array<{pick_number?: number, overall?: number, player_id?: string, playerId?: string, auto?: boolean, source?: string}>} rows
+   */
+  hydrate(rows = []) {
+    this.reset({ silent: true });
+    const ordered = [...rows].sort(
+      (a, b) => (a.pick_number ?? a.overall) - (b.pick_number ?? b.overall)
+    );
+    let applied = 0;
+    ordered.forEach((row) => {
+      const playerId = row.player_id ?? row.playerId;
+      try {
+        this.makePick(playerId, { auto: row.auto, source: row.source });
+        applied += 1;
+      } catch {
+        /* skip unreplayable rows */
+      }
+    });
+    this.emit('change', { reason: 'hydrate', applied });
+    return applied;
+  }
+
+  /** Serialisable snapshot — used for localStorage and DB sync. */
   toJSON() {
     return {
       teamCount: this.teamCount,
       rounds: this.rounds,
       userTeamId: this.userTeamId,
+      timerSeconds: this.timerSeconds,
       currentPick: this.currentPick,
       complete: this.complete,
-      picks: this.picks,
-      rosters: this.rosters
+      picks: this.picks.map((pick) => ({
+        pick_number: pick.overall,
+        round: pick.round,
+        team_id: pick.teamId,
+        player_id: pick.playerId,
+        auto: pick.auto,
+        source: pick.source,
+        picked_at: new Date(pick.timestamp).toISOString()
+      }))
     };
   }
 
@@ -403,4 +609,8 @@ export class DraftEngine {
 
 function clonePlayers(players) {
   return players.map((player) => ({ ...player }));
+}
+
+function round1(value) {
+  return Math.round(value * 10) / 10;
 }
