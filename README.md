@@ -59,15 +59,20 @@ Round 2 (even)  teams 12 11 10  9  8  7  6  5  4  3  2  1
 Round 3 (odd)   teams  1  2  3  4  5  6  7  8  9 10 11 12
 ```
 
-One formula owns this, in both places it matters:
+Two pure helpers own this (`js/draftEngine.js`), plus their Postgres mirror:
 
 ```js
-// js/draftEngine.js
-teamIdForPick(overall) {
-  const index = overall - 1;
-  const round = Math.floor(index / this.teamCount);
-  const slot  = index % this.teamCount;
-  return round % 2 === 0 ? slot + 1 : this.teamCount - slot;
+// pick -> team.  snakeTeamId() is the same thing, 1-based.
+export function snakeTeamIndex(overallPick, totalTeams) {
+  const round       = Math.ceil(overallPick / totalTeams);
+  const pickInRound = ((overallPick - 1) % totalTeams) + 1;
+  return round % 2 === 1 ? pickInRound - 1 : totalTeams - pickInRound;
+}
+
+// team -> pick (the inverse, used by the board matrix)
+export function snakePickNumber(round, teamId, totalTeams) {
+  const pickInRound = round % 2 === 1 ? teamId : totalTeams - teamId + 1;
+  return (round - 1) * totalTeams + pickInRound;
 }
 ```
 
@@ -76,9 +81,18 @@ teamIdForPick(overall) {
 select public.fsnv2_snake_team(pick_number, total_teams);
 ```
 
-`currentRound`, `currentSlot`, `currentTeamId`, the "on the clock" header, the
-board highlight and `nextUp(n)` all derive from it, so every indicator moves
-together on each selection — including the double pick at a turn (12 → 12).
+Team 1 therefore owns picks **1, 24, 25, 48** through round 4; team 12 owns
+**12, 13, 36, 37**. `currentRound`, `currentSlot`, `currentTeamId`, the "on the
+clock" header, the board highlight, `nextUp(n)` and every auto-pick path derive
+from the same pair, so all indicators move together on each selection.
+
+### Board matrix
+
+The board grid is keyed by **team column**, not by pick order: for each round
+row, cell *c* holds `pickNumberFor(round, c)`. So round 2 shows pick 13 in
+column 12 and counts down to pick 24 in column 1, and every cell — including
+the "on the clock" highlight and the click target that loads a roster — sits
+under the franchise that actually owns it.
 
 ## The pick clock
 

@@ -143,12 +143,16 @@ export function renderBoard(engine, ui) {
   });
 
   for (let round = 1; round <= rounds; round += 1) {
-    frag.appendChild(boardCell('board-round', `R${round}`));
+    const label = boardCell('board-round', `R${round}`);
+    label.classList.add(round % 2 === 0 ? 'is-reverse' : 'is-forward');
+    label.title = round % 2 === 0 ? `Round ${round}: teams ${teamCount} → 1` : `Round ${round}: teams 1 → ${teamCount}`;
+    frag.appendChild(label);
 
-    for (let slot = 1; slot <= teamCount; slot += 1) {
-      const overall = (round - 1) * teamCount + slot;
-      const teamId = engine.teamIdForPick(overall);
-      const pick = engine.pickAt(round, slot);
+    // One cell per TEAM column: the snake decides which pick number lands
+    // there, so round 2 shows pick 13 under team 12 and pick 24 under team 1.
+    for (let teamId = 1; teamId <= teamCount; teamId += 1) {
+      const overall = engine.pickNumberFor(round, teamId);
+      const pick = engine.pickForTeam(round, teamId);
       const cell = boardCell('board-cell', '');
       cell.dataset.teamId = String(teamId);
       cell.dataset.overall = String(overall);

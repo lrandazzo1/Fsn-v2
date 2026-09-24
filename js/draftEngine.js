@@ -33,10 +33,57 @@ import { draftValue, enrichPlayers, recommendPlayers } from './vorMath.js';
 import { loadPlayers } from './playerData.js';
 import { PickTimer } from './draftTimer.js';
 
+/* ---------------------------------------------------------------------------
+ * Pure snake helpers — no engine instance required, so the renderer, the bots,
+ * the tests and any future server code can all share one implementation.
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Maps a 1-based overall pick to a 0-based team index.
+ *
+ *   round       = Math.ceil(overallPick / totalTeams)
+ *   pickInRound = (overallPick - 1) % totalTeams + 1
+ *   odd round   -> pickInRound - 1                 (1 -> N)
+ *   even round  -> totalTeams - pickInRound        (N -> 1)
+ *
+ * @param {number} overallPick 1-based
+ * @param {number} totalTeams
+ * @param {'snake'|'linear'} [draftType]
+ * @returns {number} 0-based team index
+ */
+export function snakeTeamIndex(overallPick, totalTeams, draftType = 'snake') {
+  const round = Math.ceil(overallPick / totalTeams);
+  const pickInRound = ((overallPick - 1) % totalTeams) + 1;
+  if (draftType === 'linear') return pickInRound - 1;
+  return round % 2 === 1 ? pickInRound - 1 : totalTeams - pickInRound;
+}
+
+/** Same mapping, 1-based team id. Mirrors public.fsnv2_snake_team() in Postgres. */
+export function snakeTeamId(overallPick, totalTeams, draftType = 'snake') {
+  return snakeTeamIndex(overallPick, totalTeams, draftType) + 1;
+}
+
+/**
+ * Inverse mapping: which overall pick does a team own in a given round?
+ * Round 2 gives team 12 pick 13 and team 1 pick 24.
+ *
+ * @param {number} round 1-based
+ * @param {number} teamId 1-based
+ * @param {number} totalTeams
+ * @param {'snake'|'linear'} [draftType]
+ * @returns {number} 1-based overall pick
+ */
+export function snakePickNumber(round, teamId, totalTeams, draftType = 'snake') {
+  const pickInRound = draftType === 'linear' || round % 2 === 1 ? teamId : totalTeams - teamId + 1;
+  return (round - 1) * totalTeams + pickInRound;
+}
+
 const DEFAULTS = {
   teamCount: 12,
   rounds: 15,
   userTeamId: 1,
+  /** 'snake' reverses every even round; 'linear' keeps 1 -> N every round. */
+  draftType: 'snake',
   /** Pick clock length in seconds. */
   timerSeconds: 60,
   /** Start the clock automatically as soon as the draft begins. */
@@ -168,10 +215,22 @@ export class DraftEngine {
    * @returns {number} team id
    */
   teamIdForPick(overall) {
-    const index = overall - 1;
-    const round = Math.floor(index / this.teamCount);
-    const slot = index % this.teamCount;
-    return round % 2 === 0 ? slot + 1 : this.teamCount - slot;
+    return snakeTeamId(overall, this.teamCount, this.config.draftType);
+  }
+
+  /**
+   * Inverse of `teamIdForPick`: the overall pick a team owns in a round.
+   * This is what the board matrix uses, so every cell sits in its own team's
+   * column — round 2 puts pick 13 under team 12 and pick 24 under team 1.
+   */
+  pickNumberFor(round, teamId) {
+    return snakePickNumber(round, teamId, this.teamCount, this.config.draftType);
+  }
+
+  /** The Pick a team made in a given round, if it has been made yet. */
+  pickForTeam(round, teamId) {
+    const overall = this.pickNumberFor(round, teamId);
+    return this.picks.find((pick) => pick.overall === overall);
   }
 
   /**

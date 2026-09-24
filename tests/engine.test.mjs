@@ -7,7 +7,12 @@
  */
 
 import assert from 'node:assert/strict';
-import { DraftEngine } from '../js/draftEngine.js';
+import {
+  DraftEngine,
+  snakePickNumber,
+  snakeTeamId,
+  snakeTeamIndex
+} from '../js/draftEngine.js';
 import { PickTimer } from '../js/draftTimer.js';
 
 /* --------------------------------------------------------------- harness -- */
@@ -85,6 +90,115 @@ test('snake math holds for an odd team count (11 teams)', () => {
   assert.equal(engine.teamIdForPick(23), 1);
 });
 
+test('team 1 owns picks 1, 24, 25 and 48 through round 4', () => {
+  const engine = newEngine();
+  const owned = Array.from({ length: 48 }, (_, i) => i + 1).filter(
+    (overall) => engine.teamIdForPick(overall) === 1
+  );
+  assert.deepEqual(owned, [1, 24, 25, 48]);
+});
+
+test('team 12 owns picks 12, 13, 36 and 37 through round 4', () => {
+  const engine = newEngine();
+  const owned = Array.from({ length: 48 }, (_, i) => i + 1).filter(
+    (overall) => engine.teamIdForPick(overall) === 12
+  );
+  assert.deepEqual(owned, [12, 13, 36, 37]);
+});
+
+test('snakeTeamIndex returns 0-based indexes matching the spec', () => {
+  assert.equal(snakeTeamIndex(1, 12), 0);    // R1 pick 1  -> team 1
+  assert.equal(snakeTeamIndex(12, 12), 11);  // R1 pick 12 -> team 12
+  assert.equal(snakeTeamIndex(13, 12), 11);  // R2 pick 13 -> team 12
+  assert.equal(snakeTeamIndex(24, 12), 0);   // R2 pick 24 -> team 1
+  assert.equal(snakeTeamIndex(25, 12), 0);   // R3 pick 25 -> team 1
+  assert.equal(snakeTeamIndex(48, 12), 0);   // R4 pick 48 -> team 1
+  assert.equal(snakeTeamId(13, 12), 12);
+});
+
+test('linear drafts never reverse', () => {
+  assert.equal(snakeTeamId(13, 12, 'linear'), 1);
+  assert.equal(snakeTeamId(24, 12, 'linear'), 12);
+});
+
+test('snakePickNumber is the exact inverse of snakeTeamId', () => {
+  assert.equal(snakePickNumber(1, 1, 12), 1);
+  assert.equal(snakePickNumber(2, 12, 12), 13);
+  assert.equal(snakePickNumber(2, 1, 12), 24);
+  assert.equal(snakePickNumber(3, 1, 12), 25);
+  assert.equal(snakePickNumber(4, 1, 12), 48);
+
+  for (let overall = 1; overall <= 180; overall += 1) {
+    const round = Math.ceil(overall / 12);
+    const teamId = snakeTeamId(overall, 12);
+    assert.equal(snakePickNumber(round, teamId, 12), overall, `pick ${overall}`);
+  }
+});
+
+/* ------------------------------------------------------- board matrix ----- */
+
+console.log('\nBoard matrix (team columns)');
+
+test('round 2 runs pick 13 at column 12 down to pick 24 at column 1', () => {
+  const engine = newEngine();
+  const row = Array.from({ length: 12 }, (_, i) => engine.pickNumberFor(2, i + 1));
+  assert.deepEqual(row, [24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13]);
+});
+
+test('odd rounds run left to right in the same grid', () => {
+  const engine = newEngine();
+  assert.deepEqual(
+    Array.from({ length: 12 }, (_, i) => engine.pickNumberFor(1, i + 1)),
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+  );
+  assert.deepEqual(
+    Array.from({ length: 12 }, (_, i) => engine.pickNumberFor(3, i + 1)),
+    [25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36]
+  );
+});
+
+test('every board cell belongs to the team whose column it sits in', () => {
+  const engine = newEngine();
+  for (let round = 1; round <= engine.rounds; round += 1) {
+    for (let teamId = 1; teamId <= engine.teamCount; teamId += 1) {
+      const overall = engine.pickNumberFor(round, teamId);
+      assert.equal(engine.teamIdForPick(overall), teamId, `R${round} col ${teamId}`);
+    }
+  }
+});
+
+test('the board matrix covers every pick exactly once', () => {
+  const engine = newEngine();
+  const cells = [];
+  for (let round = 1; round <= engine.rounds; round += 1) {
+    for (let teamId = 1; teamId <= engine.teamCount; teamId += 1) {
+      cells.push(engine.pickNumberFor(round, teamId));
+    }
+  }
+  assert.equal(new Set(cells).size, engine.totalPicks);
+  assert.deepEqual([...cells].sort((a, b) => a - b), Array.from({ length: 180 }, (_, i) => i + 1));
+});
+
+test('pickForTeam finds the selection sitting in each column', () => {
+  const engine = newEngine();
+  engine.autoDraftUser = true;
+  for (let i = 0; i < 48; i += 1) engine.autoPick();
+
+  for (let round = 1; round <= 4; round += 1) {
+    for (let teamId = 1; teamId <= 12; teamId += 1) {
+      const pick = engine.pickForTeam(round, teamId);
+      assert.ok(pick, `R${round} team ${teamId} should have a pick`);
+      assert.equal(pick.teamId, teamId);
+      assert.equal(pick.round, round);
+      assert.equal(pick.overall, engine.pickNumberFor(round, teamId));
+    }
+  }
+  assert.deepEqual(
+    [1, 2, 3, 4].map((round) => engine.pickForTeam(round, 1).overall),
+    [1, 24, 25, 48]
+  );
+});
+
 /* -------------------------------------------------------- on the clock ----- */
 
 console.log('\nOn-the-clock indexing');
@@ -136,6 +250,69 @@ test('nextUp is empty at the final pick', () => {
   engine.autoDraftUser = true;
   engine.simulateAll();
   assert.equal(engine.nextUp(3).length, 0);
+});
+
+/* ------------------------------------------------ simulation / auto-pick -- */
+
+console.log('\nSimulation and auto-pick routing');
+
+test('Simulate Round fills one roster slot per team, in snake order', () => {
+  const engine = newEngine();
+  engine.autoDraftUser = true;
+
+  engine.simulateRound(); // round 1
+  engine.teams.forEach((team) => assert.equal(team.roster.length, 1, team.name));
+
+  engine.simulateRound(); // round 2
+  engine.teams.forEach((team) => assert.equal(team.roster.length, 2, team.name));
+
+  // Each team's round-2 player must be the one taken at its snake pick number.
+  engine.teams.forEach((team) => {
+    const overall = engine.pickNumberFor(2, team.id);
+    const pick = engine.picks.find((p) => p.overall === overall);
+    assert.equal(pick.teamId, team.id);
+    assert.ok(team.roster.includes(pick.playerId), `${team.name} should hold pick ${overall}`);
+  });
+});
+
+test('simulating through round 4 routes picks 1/24/25/48 to team 1', () => {
+  const engine = newEngine();
+  engine.autoDraftUser = true;
+  for (let round = 1; round <= 4; round += 1) engine.simulateRound();
+
+  assert.equal(engine.picks.length, 48);
+  engine.teams.forEach((team) => assert.equal(team.roster.length, 4, team.name));
+
+  const teamOne = engine.teamById(1);
+  const expected = [1, 24, 25, 48].map(
+    (overall) => engine.picks.find((pick) => pick.overall === overall).playerId
+  );
+  assert.deepEqual(teamOne.roster, expected);
+
+  // ...and team 12 holds the back-to-back turn picks.
+  const teamTwelve = engine.teamById(12);
+  const expected12 = [12, 13, 36, 37].map(
+    (overall) => engine.picks.find((pick) => pick.overall === overall).playerId
+  );
+  assert.deepEqual(teamTwelve.roster, expected12);
+});
+
+test('Sim To My Pick stops on the user pick in every round', () => {
+  const engine = newEngine({ userTeamId: 5 });
+
+  engine.advanceToUser();
+  assert.equal(engine.currentPick, 5, 'round 1 stop');
+  assert.equal(engine.isUserOnClock, true);
+  engine.autoPick({ source: 'manual' });
+
+  engine.advanceToUser();
+  assert.equal(engine.currentPick, 20, 'round 2 stop (12 - 5 + 1 = 8th slot)');
+  assert.equal(engine.currentTeamId, 5);
+  engine.autoPick({ source: 'manual' });
+
+  engine.advanceToUser();
+  assert.equal(engine.currentPick, 29, 'round 3 stop');
+  assert.equal(engine.currentTeamId, 5);
 });
 
 /* ------------------------------------------------------------- pick clock -- */
