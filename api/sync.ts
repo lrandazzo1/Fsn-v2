@@ -28,6 +28,12 @@
  * timeout with no audit trail. Whatever did run is in the response and in
  * fsnv2.sync_runs.
  *
+ * Deployment note: Vercel compiles this file to `api/sync.js` but leaves the
+ * `.ts` import specifiers alone, so `lib/**` ships with the function
+ * (`includeFiles` in vercel.json) and Node strips the types at import time —
+ * the same thing that happens when the CLI runs `scripts/sync-data.ts`. That
+ * keeps one copy of the service rather than a bundled second one.
+ *
  * Auth: set `CRON_SECRET` in the project's environment variables. Vercel sends
  * it as `Authorization: Bearer $CRON_SECRET` on cron invocations; anything else
  * needs the same header (or `?secret=`). With no CRON_SECRET configured the
