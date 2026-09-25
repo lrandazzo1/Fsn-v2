@@ -22,6 +22,8 @@
  */
 
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 
 import { createSportsDataService } from '../lib/services/sportsData.ts';
 import { currentNflWeek, currentSeason, readEnv, seasonKickoff, weekFocus } from '../lib/services/env.ts';
@@ -46,12 +48,19 @@ interface Outcome {
 const results: Outcome[] = [];
 const VERBOSE = process.argv.includes('--verbose');
 
+/** Thrown by a check that cannot run here — reported as skipped, not failed. */
+class SkipCheck extends Error {}
+
 async function check(name: string, fn: () => Promise<void> | void): Promise<void> {
   try {
     await fn();
     results.push({ name, ok: true });
     process.stdout.write(`  \u001b[32m✓\u001b[0m ${name}\n`);
   } catch (error) {
+    if (error instanceof SkipCheck) {
+      skip(name, error.message);
+      return;
+    }
     results.push({ name, ok: false, error: error as Error });
     process.stdout.write(`  \u001b[31m✗\u001b[0m ${name}\n      ${(error as Error).message}\n`);
   }
@@ -461,6 +470,14 @@ async function phaseDatabase(): Promise<void> {
 
 async function phaseRoute(): Promise<void> {
   section('4. Scheduled route (/api/sync)');
+
+  await check('the committed api/sync.js bundle matches lib/api/syncRoute.ts', () => {
+    if (!existsSync('node_modules/esbuild')) {
+      // esbuild is a devDependency; without it there is nothing to compare against.
+      throw new SkipCheck('esbuild is not installed (npm install)');
+    }
+    execFileSync('node', ['scripts/build-api.mjs', '--check'], { stdio: 'pipe' });
+  });
 
   await check('the season calendar puts kickoff on the Thursday after Labor Day', () => {
     assert.equal(seasonKickoff(2026).toISOString(), '2026-09-10T00:00:00.000Z');
