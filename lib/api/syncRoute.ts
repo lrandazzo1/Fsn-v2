@@ -1,5 +1,5 @@
 /**
- * api/sync.ts  —  GET|POST /api/sync
+ * lib/api/syncRoute.ts  —  GET|POST /api/sync
  * -----------------------------------------------------------------------------
  * The scheduled entrypoint for the ingestion service. `vercel.json` points a
  * weekly Cron Job at this route; it is also callable by hand to backfill a week.
@@ -28,11 +28,14 @@
  * timeout with no audit trail. Whatever did run is in the response and in
  * fsnv2.sync_runs.
  *
- * Deployment note: Vercel compiles this file to `api/sync.js` but leaves the
- * `.ts` import specifiers alone, so `lib/**` ships with the function
- * (`includeFiles` in vercel.json) and Node strips the types at import time —
- * the same thing that happens when the CLI runs `scripts/sync-data.ts`. That
- * keeps one copy of the service rather than a bundled second one.
+ * Deployment note: this file is the *source* of the function, not the function
+ * itself. `npm run build:api` bundles it to `api/sync.js` (git-ignored) with
+ * esbuild, and that is what Vercel deploys — because Vercel's own TypeScript
+ * step compiles only the entrypoint and leaves `.ts` import specifiers
+ * untouched, which fails at runtime with ERR_MODULE_NOT_FOUND. Bundling also
+ * means the function has no runtime dependency on type stripping. The `.ts`
+ * specifiers stay, so `node scripts/sync-data.ts` and the test suite keep
+ * importing these modules directly with no build at all.
  *
  * Auth: set `CRON_SECRET` in the project's environment variables. Vercel sends
  * it as `Authorization: Bearer $CRON_SECRET` on cron invocations; anything else
@@ -41,12 +44,12 @@
  * thing in front of it — and says so in the payload.
  */
 
-import { createSportsDataService } from '../lib/services/sportsData.ts';
-import { currentSeason, readEnv, weekFocus } from '../lib/services/env.ts';
-import { createLogger } from '../lib/services/logger.ts';
-import type { Logger } from '../lib/services/logger.ts';
-import type { SportsDataEnv, WeekFocus } from '../lib/services/env.ts';
-import type { SportsDataService, SyncResult } from '../lib/services/types.ts';
+import { createSportsDataService } from '../services/sportsData.ts';
+import { currentSeason, readEnv, weekFocus } from '../services/env.ts';
+import { createLogger } from '../services/logger.ts';
+import type { Logger } from '../services/logger.ts';
+import type { SportsDataEnv, WeekFocus } from '../services/env.ts';
+import type { SportsDataService, SyncResult } from '../services/types.ts';
 
 type TaskName = 'players' | 'schedules' | 'projections' | 'boxscores';
 

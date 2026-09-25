@@ -25,7 +25,7 @@ import assert from 'node:assert/strict';
 
 import { createSportsDataService } from '../lib/services/sportsData.ts';
 import { currentNflWeek, currentSeason, readEnv, seasonKickoff, weekFocus } from '../lib/services/env.ts';
-import { handleSyncRequest, weeklyPlan } from '../api/sync.ts';
+import { handleSyncRequest, weeklyPlan } from '../lib/api/syncRoute.ts';
 import { createLogger, silentLogger } from '../lib/services/logger.ts';
 import { createSupabaseSyncRepository } from '../lib/services/syncRepository.ts';
 import { listProviders, resolveProvider } from '../lib/services/providers/index.ts';

@@ -53,8 +53,9 @@ lib/services/providers/           Provider registry + the Tank01 / RapidAPI fetc
 lib/services/syncRepository.ts    Batched UPSERTs through the fsnv2_sync_* RPCs
 lib/services/{env,logger,httpClient,normalize,types}.ts   Config, logging, HTTP, mapping helpers
 lib/fixtures/tank01/    Recorded provider payloads (the `fixture` provider)
-api/sync.ts             Vercel Function behind the weekly cron
-vercel.json             Cron schedule + function limits
+lib/api/syncRoute.ts    The weekly cron handler (bundled to api/sync.js)
+scripts/build-api.mjs   esbuild bundle for that one function
+vercel.json             Build + cron schedule + function limits
 scripts/sync-data.ts    Sync CLI (npm run sync:data)
 scripts/test-sync-data.ts  Sync verification CLI (npm run test:sync-data)
 supabase/migrations/    Schema + RPC migrations (0004 adds the sync tables)
@@ -413,15 +414,26 @@ bundler, no `node_modules`, nothing to compile before a cron job can call it.
 
 ### Scheduled runs on Vercel
 
-`api/sync.ts` is the scheduled entrypoint, and `vercel.json` points a weekly Cron
-Job at it:
+`lib/api/syncRoute.ts` is the scheduled entrypoint, and `vercel.json` points a
+weekly Cron Job at it:
 
 ```json
 {
+  "buildCommand": "npm run build:api",
+  "outputDirectory": ".",
   "crons": [{ "path": "/api/sync", "schedule": "17 9 * * 2" }],
-  "functions": { "api/sync.ts": { "maxDuration": 60, "memory": 1024 } }
+  "functions": { "api/sync.js": { "maxDuration": 60 } }
 }
 ```
+
+`npm run build:api` bundles that one file to `api/sync.js` with esbuild — the
+project's only build step, and the only reason it has devDependencies. Vercel's
+own TypeScript step compiles a function's entrypoint but leaves its `.ts` import
+specifiers untouched and does not trace them, so a deployed `api/sync.ts` dies on
+first request with `ERR_MODULE_NOT_FOUND: /var/task/lib/services/sportsData.ts`.
+Bundling inlines the service instead, which also means the function does not
+depend on runtime type stripping. Everything else still runs unbuilt: the browser
+app is static, and the CLI and tests import the `.ts` modules directly.
 
 Tuesday 09:17 UTC, because an NFL week's games run Thursday through Monday night
 — by Tuesday morning the week just played is final and the next one is worth
@@ -505,7 +517,7 @@ npm run test:engine    # draft engine only
 npm run test:season    # season matchup engine only
 npm run test:db        # also persist the simulation to Supabase and verify
 npm run test:sync-data # the sports-data ingestion layer (no network, no keys)
-npm run typecheck      # optional: needs npm i -D typescript @types/node
+npm run typecheck      # tsc over api, lib and scripts (needs npm install)
 ```
 
 `tests/engine.test.mjs` (41 assertions) covers snake rotation across 15 rounds
@@ -560,9 +572,10 @@ straight into Postgres (the file header has the SQL).
 framework preset, no build command.
 **Vercel CLI:** `npx vercel deploy --prod`.
 
-The app itself is static, so there is nothing to build. `vercel.json` adds one
-serverless function — `api/sync.ts`, on a weekly cron — which is the only part
-of the deployment that needs environment variables (see *Scheduled runs on
+The app itself is static. `vercel.json` adds one serverless function — the weekly
+sync cron — so a Vercel deployment runs `npm run build:api` to bundle it, and
+serves the repository root as-is for everything else. That function is the only
+part of the deployment that needs environment variables (see *Scheduled runs on
 Vercel* above).
 
 > Projections in `js/playerData.js` are synthetic sample data. The background
