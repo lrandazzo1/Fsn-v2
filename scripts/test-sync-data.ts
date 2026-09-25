@@ -628,6 +628,10 @@ async function phaseRoute(): Promise<void> {
     // version of this route only handled Request — it crashed before logging.
     const { default: handler } = await import('../lib/api/syncRoute.ts');
 
+    // This path builds its own logger from the environment — quieten it.
+    const previousLevel = process.env.SPORTS_DATA_LOG_LEVEL;
+    process.env.SPORTS_DATA_LOG_LEVEL = VERBOSE ? 'debug' : 'silent';
+
     let ended = '';
     const headers: Record<string, string> = {};
     const response = {
@@ -648,6 +652,9 @@ async function phaseRoute(): Promise<void> {
       },
       response
     );
+
+    if (previousLevel === undefined) delete process.env.SPORTS_DATA_LOG_LEVEL;
+    else process.env.SPORTS_DATA_LOG_LEVEL = previousLevel;
 
     assert.equal(returned, undefined, 'a Node-style call answers through res, not a return value');
     assert.equal(response.statusCode, 400);
