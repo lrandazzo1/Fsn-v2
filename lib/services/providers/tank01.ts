@@ -364,8 +364,13 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
       external_id: externalId,
       name,
       position,
-      team: teamAbbr(row.team ?? fallbackTeam),
-      nfl_team_external_id: text(row.teamID) ?? fallbackTeamId,
+      // The roster this entry was read from is the affiliation, not the `team`
+      // field on the entry: a traded player keeps showing his old club there
+      // until the vendor rewrites the player record, while the roster he
+      // appears on flips the moment the trade lands. Only the flat player-list
+      // fallback (no enclosing roster) falls back to the entry's own fields.
+      team: teamAbbr(fallbackTeam ?? row.team),
+      nfl_team_external_id: fallbackTeamId ?? text(row.teamID),
       jersey: text(row.jerseyNum),
       status: text(injury.designation) ?? text(row.status) ?? 'Active',
       injury,

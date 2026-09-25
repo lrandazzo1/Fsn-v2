@@ -23,6 +23,16 @@
  * is unique per week anyway.
  */
 
+/**
+ * The canonical abbreviation comes from the one alias table the UI already keys
+ * on (TEAM_ALIASES in nflTeams.js), which mirrors public.fsnv2_team_abbr() and
+ * the table in lib/services/normalize.ts. This module deliberately does not
+ * keep a fourth copy.
+ */
+import { normalizeAbbr as teamAbbr } from './nflTeams.js';
+
+export { teamAbbr };
+
 /* --------------------------------------------------------------- normalising */
 
 /**
@@ -34,25 +44,6 @@ export function playerKey(name) {
   return String(name || '')
     .toLowerCase()
     .replace(/[^a-z0-9]/g, '');
-}
-
-/** Mirrors public.fsnv2_team_abbr(). Keep the two lists in step. */
-const TEAM_ALIASES = {
-  ARZ: 'ARI', BLT: 'BAL', CLV: 'CLE', GNB: 'GB', HST: 'HOU',
-  JAC: 'JAX', JAG: 'JAX', KAN: 'KC', LA: 'LAR', LVR: 'LV',
-  NOR: 'NO', NWE: 'NE', OAK: 'LV', SD: 'LAC', SDG: 'LAC',
-  SFO: 'SF', STL: 'LAR', TAM: 'TB', WFT: 'WAS', WSH: 'WAS'
-};
-
-/**
- * Folds a provider abbreviation onto the 32-team key set in nflTeams.js.
- * Unknown values pass through upper-cased rather than becoming null.
- * @param {string} abbr
- */
-export function teamAbbr(abbr) {
-  const raw = String(abbr || '').trim().toUpperCase();
-  if (!raw) return '';
-  return TEAM_ALIASES[raw] || raw;
 }
 
 /** Provider position spellings -> the app's roster positions. */

@@ -12,7 +12,7 @@
  * read the same week.
  */
 
-import { hasLiveSlate, opponentLabel, teamColor, teamLogoUrl } from '../nflTeams.js';
+import { hasLiveSlate, opponentLabel, teamLogoHtml } from '../nflTeams.js';
 import { badge, escapeHtml, refreshIcons, renderTeamOptions } from '../uiRenderer.js';
 
 export function createMatchupView({ engine, season, ui, router, onSimulateWeek, onSimulateThrough, onResetSeason }) {
@@ -319,19 +319,6 @@ export function createMatchupView({ engine, season, ui, router, onSimulateWeek, 
 }
 
 /* ----------------------------------------------------------------- helpers */
-
-/**
- * The image sits on top of a coloured abbreviation chip, so a blocked CDN
- * degrades to the chip instead of a broken-image icon.
- */
-function teamLogoHtml(abbr) {
-  const url = teamLogoUrl(abbr);
-  return `
-    <span class="team-logo" style="--team-color:${teamColor(abbr)}" title="${escapeHtml(abbr)}">
-      <span class="team-logo__abbr">${escapeHtml(abbr)}</span>
-      ${url ? `<img src="${url}" alt="" loading="lazy" onerror="this.remove()" />` : ''}
-    </span>`;
-}
 
 function fmt(value) {
   return Number(value || 0).toFixed(1);

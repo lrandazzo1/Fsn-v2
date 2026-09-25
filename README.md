@@ -59,7 +59,7 @@ scripts/build-api.mjs   esbuild bundle for that one function
 vercel.json             Build + cron schedule + function limits
 scripts/sync-data.ts    Sync CLI (npm run sync:data)
 scripts/test-sync-data.ts  Sync verification CLI (npm run test:sync-data)
-supabase/migrations/    Schema + RPC migrations (0004 sync tables, 0005 derivations, 0006 roster refresh)
+supabase/migrations/    Schema + RPC migrations (0004 adds the sync tables, 0005 the derivations, 0006 the team refresh)
 tests/engine.test.mjs   41 assertions: snake order, clock expiry, rosters, hydration
 tests/season.test.mjs   42 assertions: schedule, simulation, standings, hydration
 tests/draft-sim.test.mjs Full 15-round simulation + optional database round-trip
@@ -236,7 +236,7 @@ never collide with the existing `public.*` tables.
 **Apply them in order, all six.** `0006_fsnv2_player_team_refresh.sql` is not
 optional: without it `fsnv2_upsert_players` still carries its original 0002
 body, and the browser overwrites every synced roster on each page load (see
-[Roster affiliations](#roster-affiliations-migration-0006) below). Every
+[Team affiliations](#team-affiliations) below). Every
 migration is idempotent, so re-applying one on a project that already has it is
 a no-op.
 
@@ -319,49 +319,6 @@ Every selection in the UI is written through this RPC; `js/persistence.js`
 queues writes with retries, keeps a localStorage mirror, and reports status in
 the nav bar (`db synced` / `syncing` / `local only` / `sync error`). On load the
 app restores from the database first, then localStorage, then a fresh room.
-
-### Roster affiliations (migration 0006)
-
-`fsnv2.players` holds two kinds of row, and they have to be reconciled:
-
-| | `provider` | id | carries |
-| --- | --- | --- | --- |
-| the browser's pool | `null` | `p-0007` | `adp`, `stats.projection`, VOR |
-| the sports-data sync | `tank01` | `tank01-3917315` | the real roster: team, bye, jersey, injury |
-
-The app pushes its pool up on every boot. The original `fsnv2_upsert_players`
-wrote `team = excluded.team` unconditionally, so each page load overwrote the
-synced roster with whatever `js/playerData.js` last said — mid-season moves
-(Kyler Murray to MIN, David Montgomery to HOU) were clobbered back within
-seconds. Migration `0006` closes that from both sides:
-
-| Function | Grant | What it does |
-| --- | --- | --- |
-| `fsnv2_player_key(text)` | `anon` | Punctuation-stripped name key, so `Ja'Marr Chase` and `JaMarr Chase` match. `IMMUTABLE`. |
-| `fsnv2_team_abbr(text)` | `anon` | Folds 20 provider spellings onto the 32-team key set — `WSH`/`WFT`→`WAS`, `JAC`/`JAG`→`JAX`, `LVR`/`OAK`→`LV`, `ARZ`→`ARI`, `SD`→`LAC`, `STL`/`LA`→`LAR`. Unknown values pass through upper-cased. `IMMUTABLE`. |
-| `fsnv2_upsert_players(jsonb)` | `anon` | **Replaces the 0002 body.** Normalises every incoming team, then prefers the team the sync established over the one the browser sent. A player the sync has never seen keeps the caller's team, so offline-only deployments are unaffected. |
-| `fsnv2_refresh_player_teams()` | `service_role` | Repair pass: moves the legacy rows onto their synced twin's team, bye and `nfl_team_external_id`. Returns `{"matched": n, "moved": n}`. Idempotent. |
-
-The two halves match a provider row to a pool row on
-`(fsnv2_player_key(name), position)` — the id spaces do not overlap.
-
-Run the repair after every roster sync; the weekly cron already does:
-
-```bash
-npm run sync:data players
-psql "$DATABASE_URL" -c 'select public.fsnv2_refresh_player_teams();'
--- {"matched": 166, "moved": 0}
-```
-
-`moved: 0` means nothing had drifted. A non-zero `moved` after a sync is normal
-— that is a real transaction or trade landing.
-
-To check the guard is in place on a live project:
-
-```sql
-select pg_get_functiondef(oid) like '%current_teams%' as guard_present
-  from pg_proc where proname = 'fsnv2_upsert_players';
-```
 
 ### Live data in the browser
 
@@ -508,16 +465,10 @@ Node 22+ runs the TypeScript directly (`--experimental-strip-types` is the
 default from 22.6), so the service keeps the project's no-build promise: no
 bundler, no `node_modules`, nothing to compile before a cron job can call it.
 
-After a `players` run, follow it with the repair pass so the browser's own pool
-rows move onto the rosters the sync just established:
-
-```bash
-npm run sync:data -- players
-psql "$DATABASE_URL" -c 'select public.fsnv2_refresh_player_teams();'
-```
-
-See [Roster affiliations](#roster-affiliations-migration-0006) for why both
-halves are needed.
+A `players` run also repairs the browser's own pool rows: since migration
+`0006`, `fsnv2_sync_players` calls `fsnv2_refresh_player_teams()` at the end of
+every player sync, so no follow-up step is needed. Run it by hand only to patch
+rows without re-syncing — see [Team affiliations](#team-affiliations).
 
 ### Scheduled runs on Vercel
 
@@ -580,9 +531,9 @@ run in order and stop starting new work near the function's time limit, reportin
 | `CRON_SECRET` | Vercel Cron sends it as `Authorization: Bearer $CRON_SECRET`; the route requires it once set, and warns in its response while it is missing |
 | `SUPABASE_URL` | optional — defaults to the project in `js/config.js` |
 
-Migrations `0003`, `0004` and `0005` must be applied to the Supabase project
-before the first run, or every write fails with `Could not find the function
-public.fsnv2_sync_players`.
+Migrations `0003`, `0004`, `0005` and `0006` must be applied to the Supabase
+project before the first run, or every write fails with `Could not find the
+function public.fsnv2_sync_players`.
 
 ### Mapping
 
@@ -620,6 +571,36 @@ does depend on sync order — players and schedules before projections and box
 scores — which is the order the weekly bundle already runs in. A row whose game
 or player has not synced yet keeps a null rather than failing, and a re-run never
 trades a derived value back for the provider's null.
+
+### Team affiliations
+
+A player's club is whatever roster the sync read him from — never the `team`
+field on his own record, which a vendor leaves pointing at his former club for a
+while after a trade. `fetchPlayers` reads `getNFLTeams?rosters=true` and takes
+the enclosing franchise's abbreviation and id (only the flat `getNFLPlayerList`
+fallback, which has no enclosing roster, uses the entry's own fields), and
+`fsnv2_sync_players` overwrites `team` and `nfl_team_external_id` on every run
+rather than coalescing them.
+
+Two things then keep the rest of the app in step (migration `0006`):
+
+| | |
+| --- | --- |
+| `fsnv2_refresh_player_teams()` | copies the current team, NFL team id and bye week onto the synthetic `js/playerData.js` rows (provider null), matched on normalised name + position. `fsnv2_sync_players` calls it at the end of every player sync, and it can be run on its own as a patch: `select public.fsnv2_refresh_player_teams();` |
+| `fsnv2_upsert_players` | the browser re-pushes its local pool on every page load; it now resolves each row's `team` against the synced pool first, so a static file can never write a former club back over a synced one |
+
+`fsnv2_team_abbr()` gives every franchise one spelling on the way in — Tank01
+sends Washington as `WSH`, other feeds send `JAC`, `OAK` or `LA` — because the
+UI keys its colours, logos and opponents on the 32 abbreviations in
+`js/nflTeams.js`, and an abbreviation it does not know renders as a grey chip
+with no logo. The same alias table lives in `lib/services/normalize.ts` (new
+rows), in the SQL function (rows already stored) and in `js/nflTeams.js`
+(rendering, via `normalizeAbbr()`).
+
+The team badge itself is `teamLogoHtml()` in `js/nflTeams.js`, shared by the
+matchup board, the player pool, the roster slots and the Team page, and driven
+entirely by the player's current `team` — so a player who changes clubs shows
+his new badge everywhere as soon as the sync lands.
 
 > **Why `nfl_matchups` and not `matchups`?** `fsnv2.matchups` is the *fantasy*
 > head-to-head schedule: league-scoped, integer franchise slots 1-12, with the

@@ -1,21 +1,21 @@
 /**
  * playerData.js
  * -----------------------------------------------------------------------------
- * The OFFLINE FALLBACK player pool. Rows are compact tuples to keep the file
- * readable:
+ * The raw player pool. Rows are compact tuples to keep the file readable:
  *
  *   [ name, position, nflTeam, projectedPoints ]
  *
- * This is no longer the app's primary source. app.js reads the pool out of
- * `fsnv2.players` on boot (see js/liveData.js), and only falls back here when
- * Supabase is disabled, unreachable, or has not been synced yet — which is what
- * `npm run dev` with no credentials does, and what the Node test-suite uses.
+ * Projections are synthetic sample data for demo/testing purposes — swap this
+ * module for a fetch() against your projections API and nothing else changes.
  *
- * Because it is a fallback, the teams below go stale between syncs: a mid-season
- * trade shows up in Postgres immediately and here only when someone edits this
- * file. Treat a disagreement between the two as this file being out of date, not
- * the database. The projections are synthetic sample numbers throughout; the
- * real per-week numbers come from `fsnv2_projections`.
+ * The `nflTeam` column is *not* synthetic: it is the 2026 affiliation as the
+ * roster sync has it (fsnv2.players, provider rows). A trade dates this file,
+ * which is why nothing downstream trusts it on its own — `fsnv2_upsert_players`
+ * resolves each row's team against the synced pool before it is stored, and
+ * `fsnv2_refresh_player_teams()` patches these rows after every player sync
+ * (migration 0006). Refresh the column here from the same source:
+ *
+ *   select id, name, team from fsnv2.players where provider is null order by id;
  */
 
 /** @type {Array<[string, string, string, number]>} */
@@ -36,14 +36,14 @@ export const RAW_PLAYERS = [
   ['Caleb Williams', 'QB', 'CHI', 318],
   ['Bo Nix', 'QB', 'DEN', 315],
   ['Jared Goff', 'QB', 'DET', 312],
-  ['Tua Tagovailoa', 'QB', 'MIA', 305],
+  ['Tua Tagovailoa', 'QB', 'ATL', 305],
   ['Trevor Lawrence', 'QB', 'JAX', 300],
   ['Drake Maye', 'QB', 'NE', 298],
   ['Anthony Richardson', 'QB', 'IND', 295],
   ['Matthew Stafford', 'QB', 'LAR', 292],
-  ['Geno Smith', 'QB', 'SEA', 288],
-  ['Aaron Rodgers', 'QB', 'NYJ', 285],
-  ['Kirk Cousins', 'QB', 'ATL', 280],
+  ['Geno Smith', 'QB', 'NYJ', 288],
+  ['Aaron Rodgers', 'QB', 'PIT', 285],
+  ['Kirk Cousins', 'QB', 'LV', 280],
   ['Derek Carr', 'QB', 'NO', 272],
   ['J.J. McCarthy', 'QB', 'MIN', 265],
   ['Will Levis', 'QB', 'TEN', 258],
@@ -63,14 +63,14 @@ export const RAW_PLAYERS = [
   ['Kyren Williams', 'RB', 'LAR', 252],
   ['Chase Brown', 'RB', 'CIN', 248],
   ['James Cook', 'RB', 'BUF', 245],
-  ['Kenneth Walker III', 'RB', 'SEA', 240],
+  ['Kenneth Walker III', 'RB', 'KC', 240],
   ['Omarion Hampton', 'RB', 'LAC', 235],
   ['Chuba Hubbard', 'RB', 'CAR', 232],
   ['Alvin Kamara', 'RB', 'NO', 230],
   ['James Conner', 'RB', 'ARI', 228],
   ['Joe Mixon', 'RB', 'HOU', 226],
   ['David Montgomery', 'RB', 'HOU', 215],
-  ['Brian Robinson Jr.', 'RB', 'WAS', 210],
+  ['Brian Robinson Jr.', 'RB', 'ATL', 210],
   ['Tony Pollard', 'RB', 'TEN', 208],
   ['Aaron Jones', 'RB', 'MIN', 206],
   ['RJ Harvey', 'RB', 'DEN', 200],
@@ -81,24 +81,24 @@ export const RAW_PLAYERS = [
   ["D'Andre Swift", 'RB', 'CHI', 188],
   ['Rhamondre Stevenson', 'RB', 'NE', 182],
   ['Javonte Williams', 'RB', 'DAL', 178],
-  ['Najee Harris', 'RB', 'LAC', 176],
-  ['Travis Etienne Jr.', 'RB', 'JAX', 174],
+  ['Najee Harris', 'RB', 'NYG', 176],
+  ['Travis Etienne Jr.', 'RB', 'NO', 174],
   ['Jaylen Warren', 'RB', 'PIT', 172],
-  ['Rachaad White', 'RB', 'TB', 168],
+  ['Rachaad White', 'RB', 'WAS', 168],
   ['Zach Charbonnet', 'RB', 'SEA', 165],
   ['Tyjae Spears', 'RB', 'TEN', 160],
   ['Jordan Mason', 'RB', 'MIN', 158],
   ['Cam Skattebo', 'RB', 'NYG', 155],
   ['Braelon Allen', 'RB', 'NYJ', 150],
-  ['Kaleb Johnson', 'RB', 'PIT', 148],
+  ['Kaleb Johnson', 'RB', 'GB', 148],
   ['Trey Benson', 'RB', 'ARI', 145],
   ['Jaydon Blue', 'RB', 'DAL', 140],
   ['Bhayshul Tuten', 'RB', 'JAX', 138],
   ['Roschon Johnson', 'RB', 'CHI', 132],
   ['Nick Chubb', 'RB', 'HOU', 130],
   ['Austin Ekeler', 'RB', 'WAS', 128],
-  ['Rico Dowdle', 'RB', 'CAR', 126],
-  ['Tank Bigsby', 'RB', 'JAX', 122],
+  ['Rico Dowdle', 'RB', 'PIT', 126],
+  ['Tank Bigsby', 'RB', 'PHI', 122],
   ['Jerome Ford', 'RB', 'CLE', 120],
   ['Ray Davis', 'RB', 'BUF', 118],
   ['Blake Corum', 'RB', 'LAR', 115],
@@ -126,7 +126,7 @@ export const RAW_PLAYERS = [
   ['Tyreek Hill', 'WR', 'MIA', 255],
   ['Garrett Wilson', 'WR', 'NYJ', 252],
   ['Davante Adams', 'WR', 'LAR', 248],
-  ['Mike Evans', 'WR', 'TB', 245],
+  ['Mike Evans', 'WR', 'SF', 245],
   ['Marvin Harrison Jr.', 'WR', 'ARI', 242],
   ['Terry McLaurin', 'WR', 'WAS', 238],
   ['DK Metcalf', 'WR', 'PIT', 235],
@@ -135,8 +135,8 @@ export const RAW_PLAYERS = [
   ['Courtland Sutton', 'WR', 'DEN', 225],
   ['Jerry Jeudy', 'WR', 'CLE', 222],
   ['Zay Flowers', 'WR', 'BAL', 220],
-  ['DJ Moore', 'WR', 'CHI', 218],
-  ['Jaylen Waddle', 'WR', 'MIA', 215],
+  ['DJ Moore', 'WR', 'BUF', 218],
+  ['Jaylen Waddle', 'WR', 'DEN', 215],
   ['Xavier Worthy', 'WR', 'KC', 212],
   ['George Pickens', 'WR', 'DAL', 210],
   ['Rome Odunze', 'WR', 'CHI', 206],
@@ -149,20 +149,20 @@ export const RAW_PLAYERS = [
   ['Khalil Shakir', 'WR', 'BUF', 186],
   ['Ricky Pearsall', 'WR', 'SF', 182],
   ['Deebo Samuel', 'WR', 'WAS', 180],
-  ['Jakobi Meyers', 'WR', 'LV', 178],
-  ['Stefon Diggs', 'WR', 'NE', 175],
+  ['Jakobi Meyers', 'WR', 'JAX', 178],
+  ['Stefon Diggs', 'WR', 'WAS', 175],
   ['Keon Coleman', 'WR', 'BUF', 172],
   ['Emeka Egbuka', 'WR', 'TB', 170],
   ['Josh Downs', 'WR', 'IND', 166],
   ['Matthew Golden', 'WR', 'GB', 164],
   ['Jayden Reed', 'WR', 'GB', 162],
   ['Chris Olave', 'WR', 'NO', 160],
-  ['Darnell Mooney', 'WR', 'ATL', 156],
+  ['Darnell Mooney', 'WR', 'NYG', 156],
   ['Cooper Kupp', 'WR', 'SEA', 154],
-  ['Michael Pittman Jr.', 'WR', 'IND', 152],
-  ['Rashid Shaheed', 'WR', 'NO', 148],
-  ['Jauan Jennings', 'WR', 'SF', 145],
-  ["Wan'Dale Robinson", 'WR', 'NYG', 142],
+  ['Michael Pittman Jr.', 'WR', 'PIT', 152],
+  ['Rashid Shaheed', 'WR', 'SEA', 148],
+  ['Jauan Jennings', 'WR', 'MIN', 145],
+  ["Wan'Dale Robinson", 'WR', 'TEN', 142],
   ['Cedric Tillman', 'WR', 'CLE', 138],
   ['Marvin Mims Jr.', 'WR', 'DEN', 135],
   ['Luther Burden III', 'WR', 'CHI', 132],
@@ -171,13 +171,13 @@ export const RAW_PLAYERS = [
   ['Tre Harris', 'WR', 'LAC', 124],
   ['Christian Kirk', 'WR', 'HOU', 122],
   ['Brandon Aiyuk', 'WR', 'SF', 120],
-  ['Hollywood Brown', 'WR', 'KC', 118],
+  ['Hollywood Brown', 'WR', 'PHI', 118],
   ['Jalen McMillan', 'WR', 'TB', 115],
-  ['Romeo Doubs', 'WR', 'GB', 112],
+  ['Romeo Doubs', 'WR', 'NE', 112],
   ['DeMario Douglas', 'WR', 'NE', 108],
   ['Alec Pierce', 'WR', 'IND', 105],
-  ['Dontayvion Wicks', 'WR', 'GB', 102],
-  ['Kayshon Boutte', 'WR', 'NE', 100],
+  ['Dontayvion Wicks', 'WR', 'PHI', 102],
+  ['Kayshon Boutte', 'WR', 'HOU', 100],
   ['Xavier Legette', 'WR', 'CAR', 98],
   ['Andrei Iosivas', 'WR', 'CIN', 95],
   ['Elic Ayomanor', 'WR', 'TEN', 92],
@@ -194,17 +194,17 @@ export const RAW_PLAYERS = [
   ['Evan Engram', 'TE', 'DEN', 160],
   ['Tucker Kraft', 'TE', 'GB', 155],
   ['Dalton Kincaid', 'TE', 'BUF', 150],
-  ['Jonnu Smith', 'TE', 'PIT', 146],
+  ['Jonnu Smith', 'TE', 'GB', 146],
   ['Colston Loveland', 'TE', 'CHI', 140],
   ['Tyler Warren', 'TE', 'IND', 138],
   ['Hunter Henry', 'TE', 'NE', 132],
   ['Zach Ertz', 'TE', 'WAS', 128],
   ['Dallas Goedert', 'TE', 'PHI', 125],
   ['Cade Otton', 'TE', 'TB', 120],
-  ['Isaiah Likely', 'TE', 'BAL', 118],
+  ['Isaiah Likely', 'TE', 'NYG', 118],
   ['Kyle Pitts', 'TE', 'ATL', 115],
   ['Brenton Strange', 'TE', 'JAX', 110],
-  ['Chig Okonkwo', 'TE', 'TEN', 105],
+  ['Chig Okonkwo', 'TE', 'WAS', 105],
   ['Pat Freiermuth', 'TE', 'PIT', 102],
   ['Mike Gesicki', 'TE', 'CIN', 98],
 
@@ -216,12 +216,12 @@ export const RAW_PLAYERS = [
   ['Harrison Butker', 'K', 'KC', 145],
   ["Ka'imi Fairbairn", 'K', 'HOU', 143],
   ['Tyler Bass', 'K', 'BUF', 140],
-  ['Jason Sanders', 'K', 'MIA', 136],
+  ['Jason Sanders', 'K', 'NYJ', 136],
   ['Younghoe Koo', 'K', 'ATL', 134],
   ['Evan McPherson', 'K', 'CIN', 132],
   ['Wil Lutz', 'K', 'DEN', 130],
   ['Jake Elliott', 'K', 'PHI', 128],
-  ['Matt Gay', 'K', 'WAS', 124],
+  ['Matt Gay', 'K', 'LV', 124],
   ['Cairo Santos', 'K', 'CHI', 120],
 
   // --------------------------------------------------------------- DST ------
@@ -244,11 +244,6 @@ export const RAW_PLAYERS = [
 /**
  * Normalises the tuple rows into Player-shaped objects with stable ids.
  * VOR fields are left at their defaults — `vorMath.enrichPlayers()` fills them.
- *
- * The `p-0000` ids are what the draft persists, so they must stay stable: never
- * reorder RAW_PLAYERS, only append. They are also the ids the synced rows are
- * matched against in Postgres, by name and position rather than by id.
- *
  * @returns {import('./types.js').Player[]}
  */
 export function loadPlayers() {

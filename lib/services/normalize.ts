@@ -60,11 +60,46 @@ export function fantasyPosition(value: unknown): FantasyPosition | null {
   return POSITION_ALIASES[raw.toUpperCase()] ?? null;
 }
 
+/**
+ * Franchise abbreviations, canonicalised to the set the app renders with
+ * (js/nflTeams.js — the same 32 keys the logo chip, the team colours and the
+ * synthetic NFL slate are keyed on).
+ *
+ * Vendors disagree on a handful of them — Tank01 sends Washington as `WSH`,
+ * other feeds send `JAC` for Jacksonville or still carry a relocated team's old
+ * city — and an abbreviation the UI does not know renders as a grey chip with
+ * no logo and no opponent. Relocations collapse onto the current franchise:
+ * `OAK`/`SD`/`STL` are the same clubs as `LV`/`LAC`/`LAR`.
+ */
+const TEAM_ALIASES: Record<string, string> = {
+  ARZ: 'ARI',
+  BLT: 'BAL',
+  CLV: 'CLE',
+  GNB: 'GB',
+  HST: 'HOU',
+  JAC: 'JAX',
+  JAG: 'JAX',
+  KAN: 'KC',
+  LA: 'LAR',
+  LVR: 'LV',
+  NOR: 'NO',
+  NWE: 'NE',
+  OAK: 'LV',
+  SD: 'LAC',
+  SDG: 'LAC',
+  SFO: 'SF',
+  STL: 'LAR',
+  TAM: 'TB',
+  WFT: 'WAS',
+  WSH: 'WAS'
+};
+
 /** Team abbreviations are compared and stored uppercase; free agents are 'FA'. */
 export function teamAbbr(value: unknown, fallback = 'FA'): string {
   const raw = text(value);
-  if (!raw) return fallback;
-  return raw.toUpperCase();
+  if (!raw) return TEAM_ALIASES[fallback.toUpperCase()] ?? fallback;
+  const upper = raw.toUpperCase();
+  return TEAM_ALIASES[upper] ?? upper;
 }
 
 const GAME_STATUS_ALIASES: Array<[RegExp, GameStatus]> = [

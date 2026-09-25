@@ -494,7 +494,8 @@ kbd {
 
 .player-row {
   display: grid;
-  grid-template-columns: 38px minmax(0, 1fr) auto;
+  /* position badge · team badge · name+meta · stats */
+  grid-template-columns: 38px 22px minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   width: 100%;
@@ -1193,6 +1194,11 @@ kbd {
   object-fit: contain;
   background: rgba(7, 9, 13, 0.55);
 }
+/* Tighter rows carry the same chip a size down. */
+.roster-slot .team-logo,
+.matchup__player .team-logo { width: 18px; height: 18px; }
+.roster-slot .team-logo__abbr,
+.matchup__player .team-logo__abbr { font-size: 6px; }
 
 /* ----------------------------------------------------------- head to head -- */
 

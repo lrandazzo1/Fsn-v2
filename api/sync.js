@@ -200,10 +200,33 @@ function fantasyPosition(value) {
   if (!raw) return null;
   return POSITION_ALIASES[raw.toUpperCase()] ?? null;
 }
+var TEAM_ALIASES = {
+  ARZ: "ARI",
+  BLT: "BAL",
+  CLV: "CLE",
+  GNB: "GB",
+  HST: "HOU",
+  JAC: "JAX",
+  JAG: "JAX",
+  KAN: "KC",
+  LA: "LAR",
+  LVR: "LV",
+  NOR: "NO",
+  NWE: "NE",
+  OAK: "LV",
+  SD: "LAC",
+  SDG: "LAC",
+  SFO: "SF",
+  STL: "LAR",
+  TAM: "TB",
+  WFT: "WAS",
+  WSH: "WAS"
+};
 function teamAbbr(value, fallback = "FA") {
   const raw = text(value);
-  if (!raw) return fallback;
-  return raw.toUpperCase();
+  if (!raw) return TEAM_ALIASES[fallback.toUpperCase()] ?? fallback;
+  const upper = raw.toUpperCase();
+  return TEAM_ALIASES[upper] ?? upper;
 }
 var GAME_STATUS_ALIASES = [
   [/^(completed|final|closed|f\/ot)/i, "final"],
@@ -628,8 +651,13 @@ function createTank01Provider(options) {
       external_id: externalId,
       name: name2,
       position,
-      team: teamAbbr(row.team ?? fallbackTeam),
-      nfl_team_external_id: text(row.teamID) ?? fallbackTeamId,
+      // The roster this entry was read from is the affiliation, not the `team`
+      // field on the entry: a traded player keeps showing his old club there
+      // until the vendor rewrites the player record, while the roster he
+      // appears on flips the moment the trade lands. Only the flat player-list
+      // fallback (no enclosing roster) falls back to the entry's own fields.
+      team: teamAbbr(fallbackTeam ?? row.team),
+      nfl_team_external_id: fallbackTeamId ?? text(row.teamID),
       jersey: text(row.jerseyNum),
       status: text(injury.designation) ?? text(row.status) ?? "Active",
       injury,

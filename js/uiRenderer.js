@@ -9,7 +9,7 @@
  * Dashboard / League / Team views in js/views/.
  */
 
-import { hasLiveSlate, opponentLabel } from './nflTeams.js';
+import { hasLiveSlate, normalizeAbbr, opponentLabel, teamLogoHtml } from './nflTeams.js';
 import { POSITIONS, ROSTER_SLOTS } from './types.js';
 import { positionalScarcity } from './vorMath.js';
 
@@ -166,7 +166,7 @@ export function renderBoard(engine, ui) {
         cell.innerHTML = `
           <span class="board-cell__meta">${overall}.${pick.source === 'timer_expiry' ? ' ⏱' : pick.auto ? ' AUTO' : ''}</span>
           <span class="board-cell__name">${escapeHtml(shortName(player.name))}</span>
-          <span class="board-cell__pos">${player.position} · ${player.team}</span>`;
+          <span class="board-cell__pos">${player.position} · ${escapeHtml(normalizeAbbr(player.team))}</span>`;
       } else if (overall === engine.currentPick && !engine.complete) {
         cell.classList.add('is-onclock');
         cell.innerHTML = `
@@ -240,9 +240,10 @@ export function renderPool(engine, ui) {
 
     row.innerHTML = `
       ${badge(player.position)}
+      ${teamLogoHtml(player.team)}
       <span class="player-row__main">
         <span class="player-row__name">${escapeHtml(player.name)}</span>
-        <span class="player-row__meta">${player.team} · ${player.position}${player.posRank} · Tier ${player.tier} · ADP ${player.adp}</span>
+        <span class="player-row__meta">${escapeHtml(normalizeAbbr(player.team))} · ${player.position}${player.posRank} · Tier ${player.tier} · ADP ${player.adp}</span>
       </span>
       <span class="player-row__stats">
         <span class="player-row__vor ${player.vor >= 0 ? 'is-pos' : 'is-neg'}">${formatVor(player.vor)}</span>
@@ -328,8 +329,9 @@ export function renderSlots(container, engine, teamId, scope = 'all', week = nul
         player
           ? `<span class="roster-slot__player">
                ${badge(player.position, true)}
+               ${teamLogoHtml(player.team)}
                <span class="roster-slot__name">${escapeHtml(player.name)}</span>
-               <span class="roster-slot__team">${escapeHtml(player.team)}</span>
+               <span class="roster-slot__team">${escapeHtml(normalizeAbbr(player.team))}</span>
                ${fixture}
              </span>
              <span class="roster-slot__pts">${player.projection}</span>`

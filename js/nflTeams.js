@@ -65,24 +65,93 @@ export const NFL_TEAMS = {
 /** Stable alphabetical order so the generated schedule never shifts. */
 export const NFL_ABBRS = Object.keys(NFL_TEAMS).sort();
 
+/**
+ * abbr as a feed spells it -> abbr as this module keys it.
+ *
+ * A player's `team` now comes from the roster sync rather than the static pool,
+ * and vendors do not agree on every abbreviation: Tank01 sends Washington as
+ * `WSH`, other feeds send `JAC` for Jacksonville, and a relocated club is still
+ * `OAK`/`SD`/`STL` here and there. An abbreviation this table does not resolve
+ * renders as a grey chip with no logo and no opponent, so it is applied on
+ * every lookup below. Mirrors `TEAM_ALIASES` in lib/services/normalize.ts,
+ * which canonicalises the same abbreviations on the way into the database.
+ */
+export const TEAM_ALIASES = {
+  ARZ: 'ARI',
+  BLT: 'BAL',
+  CLV: 'CLE',
+  GNB: 'GB',
+  HST: 'HOU',
+  JAC: 'JAX',
+  JAG: 'JAX',
+  KAN: 'KC',
+  LA: 'LAR',
+  LVR: 'LV',
+  NOR: 'NO',
+  NWE: 'NE',
+  OAK: 'LV',
+  SD: 'LAC',
+  SDG: 'LAC',
+  SFO: 'SF',
+  STL: 'LAR',
+  TAM: 'TB',
+  WFT: 'WAS',
+  WSH: 'WAS'
+};
+
+/**
+ * The canonical abbreviation for whatever a row carries — '' for a missing or
+ * unrecognisable value, so callers can fall back instead of rendering junk.
+ * @param {string|null|undefined} abbr
+ * @returns {string}
+ */
+export function normalizeAbbr(abbr) {
+  const raw = String(abbr ?? '').trim().toUpperCase();
+  if (!raw) return '';
+  return TEAM_ALIASES[raw] || raw;
+}
+
 const LOGO_BASE = 'https://a.espncdn.com/i/teamlogos/nfl/500';
 
 /** Seed for the synthetic NFL slate — independent of the league schedule seed. */
 const NFL_SCHEDULE_SEED = 90210;
 
 export function teamColor(abbr) {
-  return NFL_TEAMS[abbr]?.color || '#475569';
+  return NFL_TEAMS[normalizeAbbr(abbr)]?.color || '#475569';
 }
 
 export function teamName(abbr) {
-  return NFL_TEAMS[abbr]?.name || abbr;
+  const key = normalizeAbbr(abbr);
+  return NFL_TEAMS[key]?.name || key || '—';
 }
 
 /** CDN logo URL for a team abbreviation. */
 export function teamLogoUrl(abbr) {
-  const meta = NFL_TEAMS[abbr];
+  const key = normalizeAbbr(abbr);
+  const meta = NFL_TEAMS[key];
   if (!meta) return null;
-  return `${LOGO_BASE}/${(meta.slug || abbr).toLowerCase()}.png`;
+  return `${LOGO_BASE}/${(meta.slug || key).toLowerCase()}.png`;
+}
+
+/**
+ * The team badge: a logo on top of a coloured abbreviation chip, so a blocked
+ * CDN degrades to the chip instead of a broken-image icon.
+ *
+ * Shared by the matchup board, the roster slots and the Team page so a player
+ * who changed clubs shows his current badge everywhere the moment his `team`
+ * changes — there is no per-view copy to keep in step.
+ *
+ * @param {string|null|undefined} abbr a player's current team abbreviation
+ * @returns {string} HTML
+ */
+export function teamLogoHtml(abbr) {
+  const key = normalizeAbbr(abbr).replace(/[^A-Z0-9]/g, '') || 'FA';
+  const url = teamLogoUrl(key);
+  return `
+    <span class="team-logo" style="--team-color:${teamColor(key)}" title="${key}">
+      <span class="team-logo__abbr">${key}</span>
+      ${url ? `<img src="${url}" alt="" loading="lazy" onerror="this.remove()" />` : ''}
+    </span>`;
 }
 
 /* --------------------------------------------------------- weekly opponents */
@@ -141,11 +210,13 @@ function buildSlate(weeks = 14) {
  * @returns {{opponent: string, home: boolean}|null}
  */
 export function nflOpponent(abbr, week) {
-  const live = liveSlate?.get(Number(week))?.[abbr];
+  const key = normalizeAbbr(abbr);
+
+  const live = liveSlate?.get(Number(week))?.[key];
   if (live) return live;
 
   if (!slate) slate = buildSlate();
-  return slate.get(week)?.[abbr] || null;
+  return slate.get(week)?.[key] || null;
 }
 
 /** "@ MIA" / "vs NYJ" — the matchup label shown under a player's name. */
