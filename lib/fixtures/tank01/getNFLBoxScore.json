@@ -11,10 +11,15 @@
         "longName": "Jahmyr Gibbs",
         "teamAbv": "DET",
         "teamID": "11",
-        "pos": "RB",
         "fantasyPoints": "0.0",
-        "Rushing": { "carries": "0", "rushYds": "0", "rushTD": "0" },
-        "snapCounts": { "offSnaps": "0" }
+        "Rushing": {
+          "carries": "0",
+          "rushYds": "0",
+          "rushTD": "0"
+        },
+        "snapCounts": {
+          "offSnaps": "0"
+        }
       }
     }
   }

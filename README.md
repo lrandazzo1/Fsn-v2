@@ -58,7 +58,7 @@ scripts/build-api.mjs   esbuild bundle for that one function
 vercel.json             Build + cron schedule + function limits
 scripts/sync-data.ts    Sync CLI (npm run sync:data)
 scripts/test-sync-data.ts  Sync verification CLI (npm run test:sync-data)
-supabase/migrations/    Schema + RPC migrations (0004 adds the sync tables)
+supabase/migrations/    Schema + RPC migrations (0004 adds the sync tables, 0005 the derivations)
 tests/engine.test.mjs   41 assertions: snake order, clock expiry, rosters, hydration
 tests/season.test.mjs   42 assertions: schedule, simulation, standings, hydration
 tests/draft-sim.test.mjs Full 15-round simulation + optional database round-trip
@@ -473,8 +473,8 @@ run in order and stop starting new work near the function's time limit, reportin
 | `CRON_SECRET` | Vercel Cron sends it as `Authorization: Bearer $CRON_SECRET`; the route requires it once set, and warns in its response while it is missing |
 | `SUPABASE_URL` | optional — defaults to the project in `js/config.js` |
 
-Migrations `0003` and `0004` must be applied to the Supabase project before the
-first run, or every write fails with `Could not find the function
+Migrations `0003`, `0004` and `0005` must be applied to the Supabase project
+before the first run, or every write fails with `Could not find the function
 public.fsnv2_sync_players`.
 
 ### Mapping
@@ -492,6 +492,20 @@ numbers, `PK` → `K` and `DEF` → `DST`, positions the fantasy pool has no slo
 (OL, LB, CB) dropped rather than fatal, nested stat groups flattened to
 `{"passing.passYds": 248.6}`, and game status text mapped onto
 `scheduled | in_progress | final | postponed | canceled`.
+
+Two columns the feed simply does not carry are derived in SQL instead
+(migration `0005`), from data the database already holds:
+
+| Column | Derived from | Why not in the mapper |
+| --- | --- | --- |
+| `projections.opponent` | `fsnv2.nfl_matchups` — the other side of that team's game that week | the projections endpoint has no opponent field, and the schedule is already synced |
+| `weekly_stats.position` | `fsnv2.players` — same provider and external id | box-score entries have no position, and the roster is already synced |
+
+Deriving on write costs no extra provider calls and works for any provider. It
+does depend on sync order — players and schedules before projections and box
+scores — which is the order the weekly bundle already runs in. A row whose game
+or player has not synced yet keeps a null rather than failing, and a re-run never
+trades a derived value back for the provider's null.
 
 > **Why `nfl_matchups` and not `matchups`?** `fsnv2.matchups` is the *fantasy*
 > head-to-head schedule: league-scoped, integer franchise slots 1-12, with the
@@ -546,10 +560,13 @@ on a machine with no credentials and no network:
    crash.
 3. **Database writes** — the *production* repository drives the `fsnv2_sync_*`
    contract (batching, counting, retries) against an in-memory stand-in that
-   mirrors migration 0004's unique keys. Each task runs **twice**: the second
-   pass must insert 0 rows and update the same count, which is what "upsert, no
-   duplicates" means in terms the runner can check. Batch sizing, a rejected
-   batch still being audited, and `--dry-run` writing nothing are covered too.
+   mirrors migrations 0004 and 0005: the same unique keys, and the same
+   derivation of `projections.opponent` and `weekly_stats.position`. Each task
+   runs **twice**: the second pass must insert 0 rows and update the same count,
+   which is what "upsert, no duplicates" means in terms the runner can check.
+   Batch sizing, a rejected batch still being audited, `--dry-run` writing
+   nothing, derivation with and without its source data, and a re-run keeping a
+   derived value are covered too.
 4. **The cron route** — the calendar maths (kickoff dates, week boundaries, what
    a Tuesday run versus a mid-week run should fetch), then `/api/sync` itself:
    the weekly bundle, explicit `task`/`week` parameters, `dry_run` writing

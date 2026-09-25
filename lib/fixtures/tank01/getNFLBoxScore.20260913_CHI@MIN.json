@@ -13,30 +13,54 @@
         "longName": "Caleb Williams",
         "teamAbv": "CHI",
         "teamID": "6",
-        "pos": "QB",
         "fantasyPoints": "21.8",
-        "Passing": { "passAttempts": "34", "passCompletions": "23", "passYds": "281", "passTD": "2", "int": "1" },
-        "Rushing": { "carries": "4", "rushYds": "22", "rushTD": "0" },
-        "snapCounts": { "offSnaps": "64", "offSnapPct": "1.00", "defSnaps": "0" }
+        "Passing": {
+          "passAttempts": "34",
+          "passCompletions": "23",
+          "passYds": "281",
+          "passTD": "2",
+          "int": "1"
+        },
+        "Rushing": {
+          "carries": "4",
+          "rushYds": "22",
+          "rushTD": "0"
+        },
+        "snapCounts": {
+          "offSnaps": "64",
+          "offSnapPct": "1.00",
+          "defSnaps": "0"
+        }
       },
       "4262921": {
         "playerID": "4262921",
         "longName": "Justin Jefferson",
         "teamAbv": "MIN",
         "teamID": "18",
-        "pos": "WR",
         "fantasyPoints": "24.6",
-        "Receiving": { "targets": "12", "receptions": "8", "recYds": "126", "recTD": "1" },
-        "snapCounts": { "offSnaps": "58", "offSnapPct": "0.92" }
+        "Receiving": {
+          "targets": "12",
+          "receptions": "8",
+          "recYds": "126",
+          "recTD": "1"
+        },
+        "snapCounts": {
+          "offSnaps": "58",
+          "offSnapPct": "0.92"
+        }
       },
       "17427": {
         "playerID": "17427",
         "longName": "Cairo Santos",
         "teamAbv": "CHI",
         "teamID": "6",
-        "pos": "PK",
         "fantasyPoints": "9.0",
-        "Kicking": { "fgMade": "2", "fgAttempts": "2", "xpMade": "2", "fgLong": "48" }
+        "Kicking": {
+          "fgMade": "2",
+          "fgAttempts": "2",
+          "xpMade": "2",
+          "fgLong": "48"
+        }
       }
     },
     "DST": {

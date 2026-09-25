@@ -1,9 +1,11 @@
 /**
  * testing/memoryRpc.ts
  * -----------------------------------------------------------------------------
- * An in-memory stand-in for the `fsnv2_sync_*` RPCs, mirroring what migration
- * 0004 does: the same unique keys, the same inserted/updated/skipped counts, the
- * same validation errors.
+ * An in-memory stand-in for the `fsnv2_sync_*` RPCs, mirroring what migrations
+ * 0004 and 0005 do: the same unique keys, the same inserted/updated/skipped
+ * counts, the same validation errors, and the same derivation of the two columns
+ * the provider leaves out (a projection's opponent from the synced schedule, a
+ * box-score row's position from the synced player).
  *
  * It exists so `npm run test:sync-data` can prove the *write path* — batching,
  * conflict keys, idempotency, audit rows — on a machine with no database and no
@@ -32,6 +34,35 @@ export interface MemoryRpc {
 }
 
 const FANTASY_POSITIONS = new Set(['QB', 'RB', 'WR', 'TE', 'K', 'DST']);
+
+function str(value: unknown): string | null {
+  if (value === undefined || value === null || value === '') return null;
+  return String(value);
+}
+
+/** Mirrors 0005: the other side of that team's game, that week. */
+function deriveOpponent(
+  schedules: Map<string, Record<string, unknown>>,
+  row: Record<string, unknown>
+): string | null {
+  const team = str(row.team)?.toUpperCase();
+  if (!team) return null;
+
+  for (const game of schedules.values()) {
+    if (
+      String(game.season) !== String(row.season) ||
+      String(game.week) !== String(row.week) ||
+      String(game.season_type ?? 'reg') !== String(row.season_type ?? 'reg')
+    ) {
+      continue;
+    }
+    const home = str(game.home_team)?.toUpperCase() ?? null;
+    const away = str(game.away_team)?.toUpperCase() ?? null;
+    if (home === team) return away;
+    if (away === team) return home;
+  }
+  return null;
+}
 
 function rows(args: Record<string, unknown>, key: string): Array<Record<string, unknown>> {
   const value = args[key];
@@ -158,7 +189,17 @@ export function createMemoryRpc(): MemoryRpc {
               row.scoring_format ?? 'ppr',
               row.external_player_id
             ].join(':'),
-          (existing, row) => ({ ...existing, ...row, provider })
+          (existing, row) => ({
+            ...existing,
+            ...row,
+            provider,
+            // Derived on write, and never traded back for a null on a re-run.
+            opponent:
+              str(row.opponent)?.toUpperCase() ??
+              deriveOpponent(store.schedules, row) ??
+              existing?.opponent ??
+              null
+          })
         );
       }
 
@@ -179,7 +220,16 @@ export function createMemoryRpc(): MemoryRpc {
             [provider, row.season, row.season_type ?? 'reg', row.week, row.external_player_id].join(
               ':'
             ),
-          (existing, row) => ({ ...existing, ...row, provider })
+          (existing, row) => ({
+            ...existing,
+            ...row,
+            provider,
+            position:
+              str(row.position)?.toUpperCase() ??
+              str(store.players.get(`${provider}:${String(row.external_player_id)}`)?.position) ??
+              existing?.position ??
+              null
+          })
         );
       }
 

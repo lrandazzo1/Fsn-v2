@@ -8,7 +8,6 @@
         "team": "CHI",
         "teamID": "6",
         "pos": "QB",
-        "opponent": "MIN",
         "fantasyPoints": "19.4",
         "Passing": {
           "passAttempts": "33.1",
@@ -28,7 +27,6 @@
         "team": "MIN",
         "teamID": "18",
         "pos": "WR",
-        "opponent": "CHI",
         "fantasyPoints": "18.7",
         "Receiving": {
           "targets": "10.4",
@@ -43,7 +41,6 @@
         "team": "DET",
         "teamID": "11",
         "pos": "RB",
-        "opponent": "GB",
         "fantasyPoints": "17.2",
         "Rushing": {
           "carries": "15.2",
@@ -63,7 +60,6 @@
         "team": "GB",
         "teamID": "12",
         "pos": "RB",
-        "opponent": "DET",
         "fantasyPoints": "15.9",
         "Rushing": {
           "carries": "17.8",
@@ -82,7 +78,6 @@
         "team": "CHI",
         "teamID": "6",
         "pos": "PK",
-        "opponent": "MIN",
         "fantasyPoints": "8.1",
         "Kicking": {
           "fgMade": "1.7",
@@ -96,7 +91,6 @@
         "team": "DET",
         "teamID": "11",
         "pos": "WR",
-        "opponent": "GB",
         "fantasyPointsDefault": {
           "standard": "12.1",
           "halfPPR": "14.6",

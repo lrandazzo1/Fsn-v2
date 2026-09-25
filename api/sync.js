@@ -658,6 +658,8 @@ function createTank01Provider(options) {
         name: text(entry.longName) ?? text(entry.espnName),
         position: text(entry.pos) ?? text(entry.position),
         team: text(entry.team) ? teamAbbr(entry.team) : null,
+        // The live projections feed carries no opponent; fsnv2_sync_projections
+        // derives it from fsnv2.nfl_matchups on the way in (migration 0005).
         opponent: text(entry.opponent) ? teamAbbr(entry.opponent) : null,
         fantasy_points: fantasyPointsOf(entry, context.scoringFormat),
         stats,
@@ -751,6 +753,8 @@ function createTank01Provider(options) {
       season_type: context.seasonType,
       game_external_id: gameId,
       name: text(entry.longName) ?? text(entry.espnName),
+      // Box-score entries carry no position; fsnv2_sync_weekly_stats fills it
+      // from the synced player pool on the way in (migration 0005).
       position: text(entry.pos) ?? text(entry.position),
       team: team ? teamAbbr(team) : null,
       opponent,
