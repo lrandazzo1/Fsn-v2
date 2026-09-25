@@ -484,7 +484,7 @@ public.fsnv2_sync_players`.
 | `fsnv2.nfl_teams` | `getNFLTeams` | bye week read out of `byeWeeks[season]` |
 | `fsnv2.players` | `getNFLTeams?rosters=true` | one call for players *and* their team; falls back to `getNFLPlayerList` |
 | `fsnv2.projections` | `getNFLProjections` | `playerProjections` + `teamDefenseProjections` (`DST-<ABBR>`) |
-| `fsnv2.weekly_stats` | `getNFLGamesForWeek` → `getNFLBoxScore` | per-game, opponent derived from the game |
+| `fsnv2.weekly_stats` | `getNFLGamesForWeek` → `getNFLBoxScore` | per-game, opponent derived from the game; the `DST` node is keyed `home`/`away` and carries no fantasy total, so team-defense points are computed |
 | `fsnv2.nfl_matchups` | `getNFLGamesForWeek` | kickoff from `gameTime_epoch`, else `gameDate` + `gameTime` (US Eastern) |
 
 Provider quirks are absorbed in `lib/services/normalize.ts`: string-typed
@@ -492,6 +492,13 @@ numbers, `PK` → `K` and `DEF` → `DST`, positions the fantasy pool has no slo
 (OL, LB, CB) dropped rather than fatal, nested stat groups flattened to
 `{"passing.passYds": 248.6}`, and game status text mapped onto
 `scheduled | in_progress | final | postponed | canceled`.
+
+Team defenses need one more thing the feed does not provide: a box score's `DST`
+node is raw stats only, so their fantasy points are computed in the mapper from
+the same defensive weights the provider is asked to use for skill players, plus
+the conventional points-allowed tiers (shutout 10, 1-6 → 7, 7-13 → 4, 14-20 → 1,
+21-27 → 0, 28-34 → -1, 35+ → -4). Projections do carry a defensive total, and
+that one is kept as sent.
 
 Two columns the feed simply does not carry are derived in SQL instead
 (migration `0005`), from data the database already holds:

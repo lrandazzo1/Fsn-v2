@@ -64,14 +64,27 @@
       }
     },
     "DST": {
-      "MIN": {
-        "teamAbv": "MIN",
+      "home": {
         "teamID": "18",
-        "fantasyPointsDefault": "11.0",
-        "defTD": "1",
+        "teamAbv": "MIN",
         "sacks": "3",
-        "int": "1",
-        "ptsAllowed": "20"
+        "defensiveInterceptions": "1",
+        "fumblesRecovered": "1",
+        "defTD": "1",
+        "safeties": "0",
+        "ptsAllowed": "20",
+        "ydsAllowed": "318"
+      },
+      "away": {
+        "teamID": "6",
+        "teamAbv": "CHI",
+        "sacks": "1",
+        "defensiveInterceptions": "0",
+        "fumblesRecovered": "0",
+        "defTD": "0",
+        "safeties": "0",
+        "ptsAllowed": "24",
+        "ydsAllowed": "402"
       }
     }
   }

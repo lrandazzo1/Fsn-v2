@@ -139,6 +139,86 @@ function fantasyPointsOf(entry: Record<string, unknown>, format: ScoringFormat):
   return num(fallback);
 }
 
+/**
+ * Team-defense scoring, matching the defensive weights this provider is already
+ * asked to use for skill players (see BASE_SCORING) plus the conventional
+ * points-allowed tiers. Needed because a box score's `DST` node carries only raw
+ * defensive stats — no fantasy total — so a team defense would otherwise score
+ * zero every week. Projections, which do carry a total, keep the provider's.
+ */
+const DST_WEIGHTS = {
+  sack: 1,
+  interception: 2,
+  fumbleRecovery: 2,
+  touchdown: 6,
+  safety: 2,
+  blockedKick: 2
+};
+
+export function pointsAllowedBonus(pointsAllowed: number): number {
+  if (pointsAllowed <= 0) return 10;
+  if (pointsAllowed <= 6) return 7;
+  if (pointsAllowed <= 13) return 4;
+  if (pointsAllowed <= 20) return 1;
+  if (pointsAllowed <= 27) return 0;
+  if (pointsAllowed <= 34) return -1;
+  return -4;
+}
+
+/** The stat names differ between the projections and box-score payloads. */
+function firstNum(entry: Record<string, unknown>, keys: string[]): number {
+  for (const key of keys) {
+    const value = optionalNum(entry[key]);
+    if (value !== null) return value;
+  }
+  return 0;
+}
+
+/** Returns null when the row carries no defensive stats to score. Exported for the test suite. */
+export function defenseFantasyPoints(entry: Record<string, unknown>): number | null {
+  const present = [
+    'sacks',
+    'defSack',
+    'defensiveInterceptions',
+    'interceptions',
+    'defInt',
+    'fumblesRecovered',
+    'fumbleRecoveries',
+    'defTD',
+    'ptsAllowed',
+    'ptsAgainst'
+  ].some((key) => optionalNum(entry[key]) !== null);
+  if (!present) return null;
+
+  const total =
+    firstNum(entry, ['sacks', 'defSack']) * DST_WEIGHTS.sack +
+    firstNum(entry, ['defensiveInterceptions', 'interceptions', 'defInt']) * DST_WEIGHTS.interception +
+    firstNum(entry, ['fumblesRecovered', 'fumbleRecoveries', 'defFumblesRecovered']) *
+      DST_WEIGHTS.fumbleRecovery +
+    (firstNum(entry, ['defTD']) + firstNum(entry, ['returnTD'])) * DST_WEIGHTS.touchdown +
+    firstNum(entry, ['safeties', 'defSafety']) * DST_WEIGHTS.safety +
+    firstNum(entry, ['blockKick', 'blockedKick']) * DST_WEIGHTS.blockedKick +
+    pointsAllowedBonus(firstNum(entry, ['ptsAllowed', 'ptsAgainst']));
+
+  return Math.round(total * 100) / 100;
+}
+
+/**
+ * A team's abbreviation, wherever this payload keeps it. The live
+ * `teamDefenseProjections` node is keyed by numeric teamID — not by
+ * abbreviation, as the shape of the box score's `DST` node suggests — so reading
+ * the key produced rows like `DST-10` for team "10". Both payloads do carry
+ * `teamAbv`, so that comes first, and a numeric key is only ever a last resort.
+ */
+function defenseTeamAbbr(entry: Record<string, unknown>): string | null {
+  const explicit = text(entry.teamAbv) ?? text(entry.team);
+  if (explicit && !/^\d+$/.test(explicit)) return teamAbbr(explicit, explicit);
+
+  const key = text(entry.__key);
+  if (key && !/^\d+$/.test(key) && !/^(home|away)$/i.test(key)) return teamAbbr(key, key);
+  return null;
+}
+
 /** Tank01 wraps everything in `{ statusCode, body }`; some hosts do not. */
 function unwrap(payload: unknown): unknown {
   if (payload && typeof payload === 'object' && !Array.isArray(payload) && 'body' in payload) {
@@ -388,20 +468,26 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
       });
     }
 
-    // Team defenses come back keyed by team abbreviation under their own node.
+    // Team defenses have their own node, keyed by numeric teamID.
     for (const entry of asRecords(envelope.teamDefenseProjections)) {
-      const abbr = text(entry.__key) ?? text(entry.team);
-      if (!abbr) continue;
+      const abbr = defenseTeamAbbr(entry);
+      if (!abbr) {
+        logger.warn('skipping a team defense projection with no resolvable team', {
+          key: text(entry.__key)
+        });
+        continue;
+      }
       const stats = statsOf(entry);
+      const provided = fantasyPointsOf(entry, context.scoringFormat);
       rows.push({
         ...base,
-        external_player_id: `DST-${teamAbbr(abbr)}`,
+        external_player_id: `DST-${abbr}`,
         player_id: null,
-        name: `${teamAbbr(abbr)} D/ST`,
+        name: `${abbr} D/ST`,
         position: 'DST',
-        team: teamAbbr(abbr),
+        team: abbr,
         opponent: text(entry.opponent) ? teamAbbr(entry.opponent) : null,
-        fantasy_points: fantasyPointsOf(entry, context.scoringFormat),
+        fantasy_points: provided || (defenseFantasyPoints(entry) ?? 0),
         stats,
         raw: entry
       });
@@ -559,13 +645,16 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
         rows.push(row);
       }
 
+      // The box score's DST node is keyed 'home'/'away' and carries only raw
+      // defensive stats, so the fantasy total is computed here.
       for (const entry of asRecords(envelope.DST)) {
-        const abbr = text(entry.teamAbv) ?? text(entry.__key);
+        const abbr = defenseTeamAbbr(entry);
         if (!abbr) continue;
-        const externalId = `DST-${teamAbbr(abbr)}`;
+        const externalId = `DST-${abbr}`;
         if (seen.has(externalId)) continue;
         seen.add(externalId);
         const stats = statsOf(entry);
+        const provided = fantasyPointsOf(entry, context.scoringFormat);
         rows.push({
           external_player_id: externalId,
           player_id: null,
@@ -573,12 +662,11 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
           week,
           season_type: context.seasonType,
           game_external_id: game.external_id,
-          name: `${teamAbbr(abbr)} D/ST`,
+          name: `${abbr} D/ST`,
           position: 'DST',
-          team: teamAbbr(abbr),
-          opponent:
-            teamAbbr(abbr) === teamAbbr(game.home_team) ? game.away_team : game.home_team,
-          fantasy_points: fantasyPointsOf(entry, context.scoringFormat),
+          team: abbr,
+          opponent: abbr === teamAbbr(game.home_team) ? game.away_team : game.home_team,
+          fantasy_points: provided || (defenseFantasyPoints(entry) ?? 0),
           stats,
           snap_counts: {},
           source: endpoints.boxScore,
