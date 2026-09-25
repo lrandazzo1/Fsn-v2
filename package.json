@@ -6,6 +6,8 @@
   "type": "module",
   "scripts": {
     "dev": "python3 -m http.server 8000",
+    "build": "npm run build:api",
+    "build:api": "node scripts/build-api.mjs",
     "test": "node tests/engine.test.mjs && node tests/season.test.mjs && node tests/draft-sim.test.mjs",
     "test:engine": "node tests/engine.test.mjs",
     "test:sim": "node tests/draft-sim.test.mjs",
@@ -17,5 +19,9 @@
   },
   "engines": {
     "node": ">=22.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "esbuild": "^0.28.2"
   }
 }

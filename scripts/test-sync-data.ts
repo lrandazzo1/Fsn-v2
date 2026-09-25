@@ -22,9 +22,12 @@
  */
 
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 
 import { createSportsDataService } from '../lib/services/sportsData.ts';
-import { currentSeason, readEnv } from '../lib/services/env.ts';
+import { currentNflWeek, currentSeason, readEnv, seasonKickoff, weekFocus } from '../lib/services/env.ts';
+import { handleSyncRequest, weeklyPlan } from '../lib/api/syncRoute.ts';
 import { createLogger, silentLogger } from '../lib/services/logger.ts';
 import { createSupabaseSyncRepository } from '../lib/services/syncRepository.ts';
 import { listProviders, resolveProvider } from '../lib/services/providers/index.ts';
@@ -45,12 +48,19 @@ interface Outcome {
 const results: Outcome[] = [];
 const VERBOSE = process.argv.includes('--verbose');
 
+/** Thrown by a check that cannot run here — reported as skipped, not failed. */
+class SkipCheck extends Error {}
+
 async function check(name: string, fn: () => Promise<void> | void): Promise<void> {
   try {
     await fn();
     results.push({ name, ok: true });
     process.stdout.write(`  \u001b[32m✓\u001b[0m ${name}\n`);
   } catch (error) {
+    if (error instanceof SkipCheck) {
+      skip(name, error.message);
+      return;
+    }
     results.push({ name, ok: false, error: error as Error });
     process.stdout.write(`  \u001b[31m✗\u001b[0m ${name}\n      ${(error as Error).message}\n`);
   }
@@ -455,10 +465,219 @@ async function phaseDatabase(): Promise<void> {
   });
 }
 
-/* ----------------------------------------------------- phase 4: live checks -- */
+
+/* ------------------------------------------------ phase 4: the cron route -- */
+
+async function phaseRoute(): Promise<void> {
+  section('4. Scheduled route (/api/sync)');
+
+  await check('the committed api/sync.js bundle matches lib/api/syncRoute.ts', () => {
+    if (!existsSync('node_modules/esbuild')) {
+      // esbuild is a devDependency; without it there is nothing to compare against.
+      throw new SkipCheck('esbuild is not installed (npm install)');
+    }
+    execFileSync('node', ['scripts/build-api.mjs', '--check'], { stdio: 'pipe' });
+  });
+
+  await check('the season calendar puts kickoff on the Thursday after Labor Day', () => {
+    assert.equal(seasonKickoff(2026).toISOString(), '2026-09-10T00:00:00.000Z');
+    assert.equal(seasonKickoff(2025).toISOString(), '2025-09-04T00:00:00.000Z');
+    // Sept 1 2027 is a Wednesday, so Labor Day is the 6th and kickoff the 9th.
+    assert.equal(seasonKickoff(2027).toISOString(), '2027-09-09T00:00:00.000Z');
+
+    assert.equal(currentNflWeek(new Date('2026-09-01T12:00:00Z'), 2026), 1, 'before kickoff reads as week 1');
+    assert.equal(currentNflWeek(new Date('2026-09-16T12:00:00Z'), 2026), 1, 'Wednesday still closes week 1');
+    assert.equal(currentNflWeek(new Date('2026-09-17T12:00:00Z'), 2026), 2, 'Thursday opens week 2');
+    assert.equal(currentNflWeek(new Date('2026-09-25T12:00:00Z'), 2026), 3);
+    assert.equal(currentNflWeek(new Date('2027-06-01T12:00:00Z'), 2026), 18, 'clamped at 18');
+  });
+
+  await check('a Tuesday run projects the week ahead and ingests the week just played', () => {
+    // Tuesday of week 3: its games finished on Monday night.
+    const tuesday = weekFocus(new Date('2026-09-29T09:17:00Z'), 2026);
+    assert.deepEqual(tuesday, { week: 3, weekComplete: true, completed: 3, upcoming: 4 });
+    assert.deepEqual(
+      weeklyPlan(tuesday).map((step) => [step.task, step.week ?? step.weeks]),
+      [['players', undefined], ['schedules', [3, 4, 5]], ['projections', 4], ['boxscores', 3]]
+    );
+
+    // Thursday of week 4: this week is being played now, so project it instead.
+    const thursday = weekFocus(new Date('2026-10-01T09:17:00Z'), 2026);
+    assert.deepEqual(thursday, { week: 4, weekComplete: false, completed: 3, upcoming: 4 });
+    assert.deepEqual(
+      weeklyPlan(thursday).map((step) => step.week ?? step.weeks),
+      [undefined, [3, 4, 5], 4, 3]
+    );
+
+    // Week 1 has no finished week behind it.
+    const opening = weekFocus(new Date('2026-09-11T09:17:00Z'), 2026);
+    assert.equal(opening.completed, null);
+    assert.equal(weeklyPlan(opening).some((step) => step.task === 'boxscores'), false);
+  });
+
+  await check('the route runs the weekly bundle and reports every task', async () => {
+    const memory = createMemoryRpc();
+    const service = fixtureService({ rpc: memory.rpc });
+    const response = await handleSyncRequest(new Request('https://fsn.test/api/sync'), {
+      service,
+      logger: silentLogger,
+      env: fixtureEnv(),
+      now: new Date('2026-09-29T09:17:00Z')
+    });
+
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as Record<string, any>;
+    assert.equal(body.ok, true);
+    assert.equal(body.mode, 'weekly');
+    assert.equal(body.provider, 'fixture');
+    assert.equal(body.season, SEASON);
+    assert.deepEqual(body.focus, { week: 3, weekComplete: true, completed: 3, upcoming: 4 });
+    assert.deepEqual(body.skipped_tasks, []);
+    assert.deepEqual(
+      body.tasks.map((task: Record<string, unknown>) => [task.task, task.week, task.ok]),
+      [
+        ['players_rosters', null, true],
+        ['schedules', null, true],
+        ['weekly_projections', 4, true],
+        ['box_scores', 3, true]
+      ]
+    );
+    assert.ok(body.written > 0, 'the bundle wrote nothing');
+    assert.equal(memory.store.runs.length, 4, 'every task left an audit row');
+  });
+
+  await check('an explicit task and week are honoured, and dry_run writes nothing', async () => {
+    const memory = createMemoryRpc();
+    const service = fixtureService({ rpc: memory.rpc });
+    const response = await handleSyncRequest(
+      new Request('https://fsn.test/api/sync?task=projections&week=3&dry_run=1'),
+      { service, logger: silentLogger, env: fixtureEnv(), now: new Date('2026-09-29T09:17:00Z') }
+    );
+
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as Record<string, any>;
+    assert.equal(body.mode, 'projections');
+    assert.equal(body.dry_run, true);
+    assert.equal(body.tasks.length, 1);
+    assert.equal(body.tasks[0].task, 'weekly_projections');
+    assert.equal(body.tasks[0].week, 3);
+    // The injected service is a live one; dry_run has to be honoured by the
+    // route passing it through, not by the caller.
+    assert.equal(body.written, 0);
+    assert.equal(memory.calls.length, 0);
+  });
+
+  await check('CRON_SECRET is enforced when it is configured', async () => {
+    const previous = process.env.CRON_SECRET;
+    process.env.CRON_SECRET = 'test-secret';
+    try {
+      const service = fixtureService({ rpc: createMemoryRpc().rpc });
+      const options = { service, logger: silentLogger, env: fixtureEnv(), now: new Date('2026-09-29T09:17:00Z') };
+
+      const denied = await handleSyncRequest(new Request('https://fsn.test/api/sync'), options);
+      assert.equal(denied.status, 401);
+      assert.equal(((await denied.json()) as Record<string, unknown>).error, 'unauthorized');
+
+      const allowed = await handleSyncRequest(
+        new Request('https://fsn.test/api/sync?task=players', {
+          headers: { authorization: 'Bearer test-secret' }
+        }),
+        options
+      );
+      assert.equal(allowed.status, 200);
+      assert.deepEqual(((await allowed.json()) as Record<string, unknown>).warnings, []);
+    } finally {
+      if (previous === undefined) delete process.env.CRON_SECRET;
+      else process.env.CRON_SECRET = previous;
+    }
+  });
+
+  await check('without CRON_SECRET the route answers but warns', async () => {
+    const previous = process.env.CRON_SECRET;
+    delete process.env.CRON_SECRET;
+    try {
+      const service = fixtureService({ rpc: createMemoryRpc().rpc });
+      const response = await handleSyncRequest(
+        new Request('https://fsn.test/api/sync?task=players'),
+        { service, logger: silentLogger, env: fixtureEnv(), now: new Date('2026-09-29T09:17:00Z') }
+      );
+      assert.equal(response.status, 200);
+      const body = (await response.json()) as Record<string, any>;
+      assert.equal(body.warnings.length, 1);
+      assert.match(body.warnings[0], /CRON_SECRET is not set/);
+    } finally {
+      if (previous !== undefined) process.env.CRON_SECRET = previous;
+    }
+  });
+
+  await check('a malformed request is a 400, not a half-run sync', async () => {
+    const memory = createMemoryRpc();
+    const service = fixtureService({ rpc: memory.rpc });
+    const options = { service, logger: silentLogger, env: fixtureEnv(), now: new Date('2026-09-29T09:17:00Z') };
+
+    for (const query of ['?task=nonsense', '?task=projections&week=0', '?season=abc', '?task=schedules&weeks=1,99']) {
+      // eslint-disable-next-line no-await-in-loop
+      const response = await handleSyncRequest(new Request(`https://fsn.test/api/sync${query}`), options);
+      assert.equal(response.status, 400, `${query} should be rejected`);
+    }
+    assert.equal(memory.calls.length, 0, 'nothing should have been written');
+  });
+
+  await check('the handler answers a Node-style (req, res) invocation too', async () => {
+    // Vercel's Node runtime may call either signature, and the first deployed
+    // version of this route only handled Request — it crashed before logging.
+    const { default: handler } = await import('../lib/api/syncRoute.ts');
+
+    let ended = '';
+    const headers: Record<string, string> = {};
+    const response = {
+      statusCode: 0,
+      setHeader: (name: string, value: string) => {
+        headers[name] = value;
+      },
+      end: (body?: string) => {
+        ended = body ?? '';
+      }
+    };
+
+    const returned = await handler(
+      {
+        url: '/api/sync?task=nonsense',
+        method: 'GET',
+        headers: { host: 'fsn.example.com', 'x-forwarded-proto': 'https' }
+      },
+      response
+    );
+
+    assert.equal(returned, undefined, 'a Node-style call answers through res, not a return value');
+    assert.equal(response.statusCode, 400);
+    assert.match(headers['content-type'] ?? '', /application\/json/);
+    assert.match((JSON.parse(ended) as { error: string }).error, /Unknown task "nonsense"/);
+  });
+
+  await check('running out of time reports the tasks that never started', async () => {
+    const memory = createMemoryRpc();
+    const service = fixtureService({ rpc: memory.rpc });
+    const response = await handleSyncRequest(new Request('https://fsn.test/api/sync'), {
+      service,
+      logger: silentLogger,
+      env: fixtureEnv(),
+      now: new Date('2026-09-29T09:17:00Z'),
+      budgetMs: -1
+    });
+
+    assert.equal(response.status, 500, 'a partial run must fail the cron invocation');
+    const body = (await response.json()) as Record<string, any>;
+    assert.equal(body.ok, false);
+    assert.equal(body.tasks.length, 0);
+    assert.deepEqual(body.skipped_tasks, ['players', 'schedules', 'projections:4', 'boxscores:3']);
+  });
+}
+
+/* ----------------------------------------------------- phase 5: live checks -- */
 
 async function phaseLive(): Promise<void> {
-  section('4. Live provider and database (skipped without credentials)');
+  section('5. Live provider and database (skipped without credentials)');
 
   const env = readEnv();
   const wantsLive = process.argv.includes('--live') || process.env.SPORTS_DATA_TEST_LIVE === '1';
@@ -523,6 +742,7 @@ async function main(): Promise<number> {
   await phaseConfiguration();
   await phaseMapping();
   await phaseDatabase();
+  await phaseRoute();
   await phaseLive();
 
   const failed = results.filter((result) => !result.ok);

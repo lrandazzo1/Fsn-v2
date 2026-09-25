@@ -25,6 +25,8 @@ export interface SportsDataEnv {
   season: number;
   seasonType: SeasonType;
   scoringFormat: ScoringFormat;
+  /** SPORTS_DATA_WEEK — pins the week the cron treats as "now". */
+  weekOverride: number | null;
   scheduleWeeks: number;
   batchSize: number;
   timeoutMs: number;
@@ -87,6 +89,62 @@ export function currentSeason(now: Date = new Date()): number {
   return now.getUTCMonth() >= 2 ? year : year - 1;
 }
 
+/**
+ * Week 1 kicks off the Thursday after Labor Day — the first Monday of
+ * September — which is what makes the week number computable instead of
+ * configurable.
+ */
+export function seasonKickoff(season: number): Date {
+  const september = new Date(Date.UTC(season, 8, 1));
+  const firstMonday = 1 + ((8 - september.getUTCDay()) % 7);
+  return new Date(Date.UTC(season, 8, firstMonday + 3));
+}
+
+/**
+ * The week a date falls in, counting Thursday-to-Wednesday from kickoff.
+ * Before the season opens it reads as week 1; after week 18 it stays at 18.
+ */
+export function currentNflWeek(now: Date = new Date(), season?: number): number {
+  const kickoff = seasonKickoff(season ?? currentSeason(now));
+  const days = Math.floor((now.getTime() - kickoff.getTime()) / 86400000);
+  if (days < 0) return 1;
+  return Math.min(18, Math.floor(days / 7) + 1);
+}
+
+export interface WeekFocus {
+  /** The calendar week, Thursday to Wednesday. */
+  week: number;
+  /** True once the week's games are over — Tuesday or Wednesday. */
+  weekComplete: boolean;
+  /** The most recent week with final scores to ingest, if any. */
+  completed: number | null;
+  /** The week to pull projections for — the next set of games to be played. */
+  upcoming: number;
+}
+
+/**
+ * Which weeks a scheduled run should actually care about.
+ *
+ * A week's games run Thursday through Monday night, so where in the week the
+ * cron fires decides what is worth fetching: on Tuesday or Wednesday the week
+ * just finished (ingest its box scores, project the next one), and mid-week the
+ * current week is still being played (project it, ingest the one before).
+ */
+export function weekFocus(now: Date = new Date(), season?: number): WeekFocus {
+  const resolved = season ?? currentSeason(now);
+  const week = currentNflWeek(now, resolved);
+  const days = Math.floor((now.getTime() - seasonKickoff(resolved).getTime()) / 86400000);
+  const dayInWeek = days < 0 ? 0 : days % 7; // 0 = Thursday
+  const weekComplete = days >= 0 && dayInWeek >= 5; // Tuesday, Wednesday
+
+  return {
+    week,
+    weekComplete,
+    completed: weekComplete ? week : week > 1 ? week - 1 : null,
+    upcoming: weekComplete ? Math.min(18, week + 1) : week
+  };
+}
+
 function oneOf<T extends string>(value: string, allowed: T[], key: string, fallback: T): T {
   if (!value) return fallback;
   if (!allowed.includes(value as T)) {
@@ -131,6 +189,7 @@ export function readEnv(source: EnvSource = process.env, now: Date = new Date())
       'SPORTS_DATA_SCORING',
       'ppr'
     ),
+    weekOverride: str(source, 'SPORTS_DATA_WEEK') ? int(source, 'SPORTS_DATA_WEEK', 0) : null,
     scheduleWeeks: int(source, 'SPORTS_DATA_SCHEDULE_WEEKS', 18),
     batchSize: Math.max(1, int(source, 'SPORTS_DATA_BATCH_SIZE', 120)),
     timeoutMs: int(source, 'SPORTS_DATA_TIMEOUT_MS', 15000),

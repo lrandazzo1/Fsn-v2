@@ -53,6 +53,9 @@ lib/services/providers/           Provider registry + the Tank01 / RapidAPI fetc
 lib/services/syncRepository.ts    Batched UPSERTs through the fsnv2_sync_* RPCs
 lib/services/{env,logger,httpClient,normalize,types}.ts   Config, logging, HTTP, mapping helpers
 lib/fixtures/tank01/    Recorded provider payloads (the `fixture` provider)
+lib/api/syncRoute.ts    The weekly cron handler (bundled to api/sync.js)
+scripts/build-api.mjs   esbuild bundle for that one function
+vercel.json             Build + cron schedule + function limits
 scripts/sync-data.ts    Sync CLI (npm run sync:data)
 scripts/test-sync-data.ts  Sync verification CLI (npm run test:sync-data)
 supabase/migrations/    Schema + RPC migrations (0004 adds the sync tables)
@@ -409,6 +412,71 @@ Node 22+ runs the TypeScript directly (`--experimental-strip-types` is the
 default from 22.6), so the service keeps the project's no-build promise: no
 bundler, no `node_modules`, nothing to compile before a cron job can call it.
 
+### Scheduled runs on Vercel
+
+`lib/api/syncRoute.ts` is the scheduled entrypoint, and `vercel.json` points a
+weekly Cron Job at it:
+
+```json
+{
+  "buildCommand": "npm run build:api",
+  "outputDirectory": ".",
+  "crons": [{ "path": "/api/sync", "schedule": "17 9 * * 2" }],
+  "functions": { "api/sync.js": { "maxDuration": 60 } }
+}
+```
+
+`npm run build:api` bundles that one file to `api/sync.js` with esbuild — the
+project's only build step, and the only reason it has devDependencies. Vercel's
+own TypeScript step compiles a function's entrypoint but leaves its `.ts` import
+specifiers untouched and does not trace them, so a deployed `api/sync.ts` dies on
+first request with `ERR_MODULE_NOT_FOUND: /var/task/lib/services/sportsData.ts`.
+Bundling inlines the service instead, which also means the function does not
+depend on runtime type stripping. Everything else still runs unbuilt: the browser
+app is static, and the CLI and tests import the `.ts` modules directly.
+
+Tuesday 09:17 UTC, because an NFL week's games run Thursday through Monday night
+— by Tuesday morning the week just played is final and the next one is worth
+projecting. The route works out which weeks matter from the calendar rather than
+from configuration (`weekFocus()` in `lib/services/env.ts`: kickoff is the
+Thursday after Labor Day, and week N runs Thursday to Wednesday):
+
+| When it fires | players | schedules | projections | box scores |
+| --- | --- | --- | --- | --- |
+| Tue/Wed — week N finished | ✓ | N-1, N, N+1 | **N+1** | **N** |
+| Thu-Mon — week N in play | ✓ | N-1, N, N+1 | **N** | **N-1** |
+| Before the opener | ✓ | 1, 2 | 1 | — (nothing played yet) |
+
+Called by hand it takes the same tasks the CLI does:
+
+```
+/api/sync                             the weekly bundle (what cron runs)
+/api/sync?task=players
+/api/sync?task=projections&week=3
+/api/sync?task=boxscores&week=2&season=2026
+/api/sync?task=schedules&weeks=1,2,3
+/api/sync?task=all&week=3&dry_run=1   fetch and map, write nothing
+```
+
+It answers with the per-task `SyncResult` list and a `200` only when every task
+succeeded — a failure or a skipped task returns `500`, so a bad run shows up as a
+failed invocation on Vercel's Cron dashboard instead of passing quietly. Tasks
+run in order and stop starting new work near the function's time limit, reporting
+`skipped_tasks` rather than dying mid-flight at the 60-second ceiling.
+
+**Environment variables** (Vercel project settings → Environment Variables):
+
+| Variable | Why |
+| --- | --- |
+| `SPORTS_DATA_API_KEY`, `SPORTS_DATA_API_HOST` | the provider |
+| `SUPABASE_SERVICE_ROLE_KEY` | the sync RPCs are granted to `service_role` only |
+| `CRON_SECRET` | Vercel Cron sends it as `Authorization: Bearer $CRON_SECRET`; the route requires it once set, and warns in its response while it is missing |
+| `SUPABASE_URL` | optional — defaults to the project in `js/config.js` |
+
+Migrations `0003` and `0004` must be applied to the Supabase project before the
+first run, or every write fails with `Could not find the function
+public.fsnv2_sync_players`.
+
 ### Mapping
 
 | Our table | Provider payload | Notes |
@@ -449,7 +517,7 @@ npm run test:engine    # draft engine only
 npm run test:season    # season matchup engine only
 npm run test:db        # also persist the simulation to Supabase and verify
 npm run test:sync-data # the sports-data ingestion layer (no network, no keys)
-npm run typecheck      # optional: needs npm i -D typescript @types/node
+npm run typecheck      # tsc over api, lib and scripts (needs npm install)
 ```
 
 `tests/engine.test.mjs` (41 assertions) covers snake rotation across 15 rounds
@@ -482,7 +550,13 @@ on a machine with no credentials and no network:
    pass must insert 0 rows and update the same count, which is what "upsert, no
    duplicates" means in terms the runner can check. Batch sizing, a rejected
    batch still being audited, and `--dry-run` writing nothing are covered too.
-4. **Live** — with `SPORTS_DATA_API_KEY` set it hits the real endpoints; with
+4. **The cron route** — the calendar maths (kickoff dates, week boundaries, what
+   a Tuesday run versus a mid-week run should fetch), then `/api/sync` itself:
+   the weekly bundle, explicit `task`/`week` parameters, `dry_run` writing
+   nothing, `CRON_SECRET` enforced when set, malformed requests rejected as 400
+   before anything is written, and a run that exhausts its time budget reporting
+   `skipped_tasks` with a 500.
+5. **Live** — with `SPORTS_DATA_API_KEY` set it hits the real endpoints; with
    `--live` and a `SUPABASE_SERVICE_ROLE_KEY` it upserts, re-upserts and reads
    back through `fsnv2_sync_status`. Without those it reports both as skipped.
 
@@ -497,6 +571,12 @@ straight into Postgres (the file header has the SQL).
 **Vercel Drop:** drag the project folder onto https://vercel.com/new/drop — no
 framework preset, no build command.
 **Vercel CLI:** `npx vercel deploy --prod`.
+
+The app itself is static. `vercel.json` adds one serverless function — the weekly
+sync cron — so a Vercel deployment runs `npm run build:api` to bundle it, and
+serves the repository root as-is for everything else. That function is the only
+part of the deployment that needs environment variables (see *Scheduled runs on
+Vercel* above).
 
 > Projections in `js/playerData.js` are synthetic sample data. The background
 > sync service above is the production path: point `SPORTS_DATA_PROVIDER` at a
