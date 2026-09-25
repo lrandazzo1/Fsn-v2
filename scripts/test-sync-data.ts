@@ -268,13 +268,21 @@ async function phaseMapping(): Promise<void> {
     );
     assert.equal(stBrown.fantasy_points, 17.1);
 
+    // The live teamDefenseProjections node is keyed by numeric teamID, so the
+    // abbreviation has to come from teamAbv — reading the key produced DST-18.
     const defense = need(
       rows.find((row) => row.external_player_id === 'DST-MIN'),
       'MIN team defense projection'
     );
     assert.equal(defense.position, 'DST');
-    assert.equal(defense.fantasy_points, 8.2);
-    assert.equal(defense.opponent, 'CHI', 'defense rows do carry an opponent');
+    assert.equal(defense.team, 'MIN');
+    assert.equal(defense.fantasy_points, 8.2, "the provider's own defensive total is kept");
+    assert.equal(defense.opponent, null);
+    assert.equal(
+      rows.some((row) => /^DST-\d+$/.test(row.external_player_id)),
+      false,
+      'no team defense may be keyed by a numeric id'
+    );
   });
 
   await check('getNFLGamesForWeek → schedule rows with UTC kickoffs and statuses', async () => {
@@ -322,12 +330,48 @@ async function phaseMapping(): Promise<void> {
     // Box-score entries carry no position; the database fills it in.
     assert.equal(jefferson.position, null);
 
+    // A box score's DST node is keyed 'home'/'away' and carries no fantasy
+    // total, so it is computed: 3 sacks + 1 int + 1 fumble + 1 TD, 20 allowed.
     const defense = need(
       rows.find((row) => row.external_player_id === 'DST-MIN'),
       'MIN team defense box score'
     );
-    assert.equal(defense.fantasy_points, 11);
+    assert.equal(defense.team, 'MIN');
     assert.equal(defense.opponent, 'CHI');
+    assert.equal(defense.fantasy_points, 3 * 1 + 2 + 2 + 6 + 1);
+    assert.equal(
+      need(rows.find((row) => row.external_player_id === 'DST-CHI'), 'CHI defense').fantasy_points,
+      1,
+      '1 sack and 24 points allowed'
+    );
+    assert.equal(
+      rows.some((row) => /^DST-(HOME|AWAY|\d+)$/i.test(row.external_player_id)),
+      false,
+      "the node's home/away key must not become the team"
+    );
+  });
+
+  await check('team-defense scoring covers the points-allowed tiers', async () => {
+    const { defenseFantasyPoints, pointsAllowedBonus } = await import(
+      '../lib/services/providers/tank01.ts'
+    );
+
+    assert.deepEqual(
+      [0, 6, 13, 20, 27, 34, 45].map((allowed) => pointsAllowedBonus(allowed)),
+      [10, 7, 4, 1, 0, -1, -4]
+    );
+
+    // A shutout with nothing else: the tier alone.
+    assert.equal(defenseFantasyPoints({ ptsAllowed: '0', sacks: '0' }), 10);
+    // Both payloads' spellings of the same stats must score identically.
+    assert.equal(
+      defenseFantasyPoints({ sacks: '2', defensiveInterceptions: '1', ptsAllowed: '14' }),
+      defenseFantasyPoints({ defSack: '2', interceptions: '1', ptsAgainst: '14' })
+    );
+    // A return touchdown counts too.
+    assert.equal(defenseFantasyPoints({ returnTD: '1', ptsAllowed: '21' }), 6);
+    // Nothing to score on: null, rather than a misleading zero.
+    assert.equal(defenseFantasyPoints({ teamAbv: 'CHI' }), null);
   });
 
   await check('a provider 500 surfaces as a failed result, not a crash', async () => {

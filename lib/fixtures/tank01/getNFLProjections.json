@@ -105,25 +105,30 @@
       }
     },
     "teamDefenseProjections": {
-      "CHI": {
-        "team": "CHI",
+      "6": {
+        "__comment": "keyed by teamID, not abbreviation \u2014 teamAbv is the only reliable name",
         "teamID": "6",
-        "opponent": "MIN",
+        "teamAbv": "CHI",
         "fantasyPointsDefault": "7.4",
         "defTD": "0.1",
         "sacks": "2.4",
-        "int": "0.8",
-        "ptsAllowed": "21.3"
+        "interceptions": "0.8",
+        "fumbleRecoveries": "0.4",
+        "safeties": "0.0",
+        "blockKick": "0.1",
+        "ptsAgainst": "21.3"
       },
-      "MIN": {
-        "team": "MIN",
+      "18": {
         "teamID": "18",
-        "opponent": "CHI",
+        "teamAbv": "MIN",
         "fantasyPointsDefault": "8.2",
         "defTD": "0.2",
         "sacks": "2.8",
-        "int": "0.9",
-        "ptsAllowed": "19.6"
+        "interceptions": "0.9",
+        "fumbleRecoveries": "0.5",
+        "safeties": "0.0",
+        "blockKick": "0.1",
+        "ptsAgainst": "19.6"
       }
     }
   }
