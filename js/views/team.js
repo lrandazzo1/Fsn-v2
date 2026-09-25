@@ -74,8 +74,8 @@ export function createTeamView({ engine, season, ui, router }) {
     ].join('');
 
     el.starterChip.textContent = `${filled}/${starterCount} filled`;
-    renderSlots(el.starters, engine, teamId, 'starters');
-    renderSlots(el.bench, engine, teamId, 'bench');
+    renderSlots(el.starters, engine, teamId, 'starters', week);
+    renderSlots(el.bench, engine, teamId, 'bench', week);
 
     renderMatchup(team, week);
 
@@ -170,9 +170,9 @@ export function createTeamView({ engine, season, ui, router }) {
   /** Actual points once the week is final, the weekly projection until then. */
   function slotPoints(week, player, final) {
     if (!player) return 0;
-    if (!final) return season.weeklyProjection(player);
+    if (!final) return season.weeklyProjection(player, week);
     const scored = season.scoreFor(week, player.id);
-    return scored === null ? season.weeklyProjection(player) : scored;
+    return scored === null ? season.weeklyProjection(player, week) : scored;
   }
 
   function playerIn(id, slotKey) {

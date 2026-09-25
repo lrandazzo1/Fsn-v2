@@ -34,20 +34,21 @@ index.html              App shell: nav bar + the four view panes
 styles.css              Dark sports-network design system (position colour coding)
 js/config.js            Supabase credentials + league defaults (override via window.FSN_CONFIG)
 js/types.js             Player / Team / Pick / DraftState shapes + roster slot template
-js/playerData.js        The player pool (compact tuples -> Player objects)
+js/playerData.js        Offline fallback pool (compact tuples -> Player objects)
+js/liveData.js          Maps the synced rows onto the pool / projection / slate shapes
 js/vorMath.js           Replacement levels, VOR, tiers, derived ADP, scarcity, recommendations
 js/draftTimer.js        The pick clock (injectable scheduler so tests run instantly)
 js/draftEngine.js       Snake state machine: pick progression, clock expiry, bots, undo, hydrate
 js/seasonEngine.js      Round-robin schedule, weekly score engine, W-L / PF / PA standings
-js/nflTeams.js          NFL colours, logo URLs and the synthetic weekly opponent slate
-js/persistence.js       DraftRepository + SeasonRepository — Supabase RPCs, localStorage mirror
+js/nflTeams.js          NFL colours, logo URLs, the synced slate and its round-robin fallback
+js/persistence.js       DraftRepository + SeasonRepository — Supabase RPCs, live reads, localStorage mirror
 js/router.js            Hash router for the app shell
 js/uiRenderer.js        Draft-room rendering + shared view helpers
 js/views/home.js        Home Dashboard
 js/views/league.js      League Overview (season standings + roster composition)
 js/views/matchup.js     Matchup / Scoreboard hub
 js/views/team.js        Team Roster
-js/app.js               Boot, state restore, event wiring, control handlers
+js/app.js               Boot, live-data load, state restore, event wiring, control handlers
 lib/services/sportsData.ts        Ingestion facade: the four sync methods
 lib/services/providers/           Provider registry + the Tank01 / RapidAPI fetcher
 lib/services/syncRepository.ts    Batched UPSERTs through the fsnv2_sync_* RPCs
@@ -58,7 +59,7 @@ scripts/build-api.mjs   esbuild bundle for that one function
 vercel.json             Build + cron schedule + function limits
 scripts/sync-data.ts    Sync CLI (npm run sync:data)
 scripts/test-sync-data.ts  Sync verification CLI (npm run test:sync-data)
-supabase/migrations/    Schema + RPC migrations (0004 adds the sync tables, 0005 the derivations)
+supabase/migrations/    Schema + RPC migrations (0004 sync tables, 0005 derivations, 0006 roster refresh)
 tests/engine.test.mjs   41 assertions: snake order, clock expiry, rosters, hydration
 tests/season.test.mjs   42 assertions: schedule, simulation, standings, hydration
 tests/draft-sim.test.mjs Full 15-round simulation + optional database round-trip
@@ -232,6 +233,18 @@ Applied to the Supabase project **FSN** as `fsnv2_draft_engine_schema`,
 tables and RPCs — apply it before the first sync run. Tables live in a dedicated `fsnv2` schema so they
 never collide with the existing `public.*` tables.
 
+**Apply them in order, all six.** `0006_fsnv2_player_team_refresh.sql` is not
+optional: without it `fsnv2_upsert_players` still carries its original 0002
+body, and the browser overwrites every synced roster on each page load (see
+[Roster affiliations](#roster-affiliations-migration-0006) below). Every
+migration is idempotent, so re-applying one on a project that already has it is
+a no-op.
+
+```bash
+# in order — 0006 replaces the 0002 definition of fsnv2_upsert_players
+for f in supabase/migrations/000*.sql; do psql "$DATABASE_URL" -f "$f"; done
+```
+
 | Table | Columns |
 | --- | --- |
 | `fsnv2.leagues` | `id`, `name`, `total_teams`, `roster_settings` (jsonb), `scoring_type`, timestamps |
@@ -307,6 +320,83 @@ queues writes with retries, keeps a localStorage mirror, and reports status in
 the nav bar (`db synced` / `syncing` / `local only` / `sync error`). On load the
 app restores from the database first, then localStorage, then a fresh room.
 
+### Roster affiliations (migration 0006)
+
+`fsnv2.players` holds two kinds of row, and they have to be reconciled:
+
+| | `provider` | id | carries |
+| --- | --- | --- | --- |
+| the browser's pool | `null` | `p-0007` | `adp`, `stats.projection`, VOR |
+| the sports-data sync | `tank01` | `tank01-3917315` | the real roster: team, bye, jersey, injury |
+
+The app pushes its pool up on every boot. The original `fsnv2_upsert_players`
+wrote `team = excluded.team` unconditionally, so each page load overwrote the
+synced roster with whatever `js/playerData.js` last said — mid-season moves
+(Kyler Murray to MIN, David Montgomery to HOU) were clobbered back within
+seconds. Migration `0006` closes that from both sides:
+
+| Function | Grant | What it does |
+| --- | --- | --- |
+| `fsnv2_player_key(text)` | `anon` | Punctuation-stripped name key, so `Ja'Marr Chase` and `JaMarr Chase` match. `IMMUTABLE`. |
+| `fsnv2_team_abbr(text)` | `anon` | Folds 20 provider spellings onto the 32-team key set — `WSH`/`WFT`→`WAS`, `JAC`/`JAG`→`JAX`, `LVR`/`OAK`→`LV`, `ARZ`→`ARI`, `SD`→`LAC`, `STL`/`LA`→`LAR`. Unknown values pass through upper-cased. `IMMUTABLE`. |
+| `fsnv2_upsert_players(jsonb)` | `anon` | **Replaces the 0002 body.** Normalises every incoming team, then prefers the team the sync established over the one the browser sent. A player the sync has never seen keeps the caller's team, so offline-only deployments are unaffected. |
+| `fsnv2_refresh_player_teams()` | `service_role` | Repair pass: moves the legacy rows onto their synced twin's team, bye and `nfl_team_external_id`. Returns `{"matched": n, "moved": n}`. Idempotent. |
+
+The two halves match a provider row to a pool row on
+`(fsnv2_player_key(name), position)` — the id spaces do not overlap.
+
+Run the repair after every roster sync; the weekly cron already does:
+
+```bash
+npm run sync:data players
+psql "$DATABASE_URL" -c 'select public.fsnv2_refresh_player_teams();'
+-- {"matched": 166, "moved": 0}
+```
+
+`moved: 0` means nothing had drifted. A non-zero `moved` after a sync is normal
+— that is a real transaction or trade landing.
+
+To check the guard is in place on a live project:
+
+```sql
+select pg_get_functiondef(oid) like '%current_teams%' as guard_present
+  from pg_proc where proname = 'fsnv2_upsert_players';
+```
+
+### Live data in the browser
+
+The UI reads the synced data directly rather than shipping it. On boot
+`js/app.js` calls `DraftRepository.liveBundle()`, which reads three RPCs — all
+granted to `anon`, so the publishable key is enough and no secret ever reaches
+the browser:
+
+| RPC | Replaces |
+| --- | --- |
+| `fsnv2_players` | the static pool in `js/playerData.js` |
+| `fsnv2_projections` | the `season projection / 17` weekly estimate |
+| `fsnv2_nfl_schedule` | the synthetic round robin behind the `@ MIA` / `vs NYJ` tags |
+
+`js/liveData.js` maps the rows onto the shapes the app already speaks and is
+pure — no network, so it is trivially testable. It mirrors `fsnv2_player_key`
+and `fsnv2_team_abbr` in JavaScript so client-side matching agrees with the
+database, and it keys team defenses by abbreviation because the provider names
+them `MIN D/ST` where the pool says `Vikings D/ST`.
+
+Two deliberate limits:
+
+- **The pool is built only from rows with a real `stats.projection`.** The sync
+  writes ~540 roster rows with `adp` 999 and no projection; letting those into
+  the pool would drag every replacement level to zero and make VOR meaningless.
+  They still inform the team/bye index.
+- **Weeks the sync has not stored fall back**, per week and per player, to the
+  round robin and the season estimate. Those opponents render in italics
+  (`.is-projected`) so a placeholder is never passed off as a real fixture.
+
+Every step is optional. A disabled, unreachable or unsynced database leaves the
+fallback in place and the app runs exactly as it did before — which is what
+`npm run dev` with no credentials does, and what the Node test-suite uses.
+Set `sportsData.enabled = false` to ignore the synced data deliberately.
+
 ### Configuration
 
 `js/config.js` carries the project URL and the **publishable** key (safe in the
@@ -320,19 +410,25 @@ editing the file:
   window.FSN_CONFIG = {
     supabase: { url: 'https://<project>.supabase.co', key: 'sb_publishable_…' },
     league:   { name: 'My League', totalTeams: 12, rounds: 15, timerSeconds: 60 },
-    season:   { weeks: 14, seed: 20260208 }
+    season:   { weeks: 14, seed: 20260208 },
+    sportsData: { season: 2026, seasonType: 'reg', scoringFormat: 'ppr', enabled: true }
   };
 </script>
 ```
 
-Set `supabase.enabled = false` to run fully offline on localStorage.
+Set `supabase.enabled = false` to run fully offline on localStorage, or
+`sportsData.enabled = false` to keep the database but ignore the synced player
+pool, projections and schedule. `sportsData.season` defaults to the season the
+current date falls in (September–February belongs to the earlier year), matching
+`lib/services/env.ts` so the browser and the sync service agree.
 
 ## Background sports-data sync
 
-The draft board runs on the synthetic pool in `js/playerData.js`. The sync
-service replaces that with real NFL data — players, rosters, weekly projections,
-box scores and the schedule — on a schedule of its own, without the UI having to
-know where any of it came from.
+The sync service pulls real NFL data — players, rosters, weekly projections,
+box scores and the schedule — into Postgres on a schedule of its own. The UI
+then reads it back through the RPCs above (see
+[Live data in the browser](#live-data-in-the-browser)); `js/playerData.js` is
+only the offline fallback for when there is nothing synced to read.
 
 ```
 lib/services/sportsData.ts          the facade: four methods, one result shape
@@ -411,6 +507,17 @@ npm run sync:data -- all --week=3 --provider=fixture
 Node 22+ runs the TypeScript directly (`--experimental-strip-types` is the
 default from 22.6), so the service keeps the project's no-build promise: no
 bundler, no `node_modules`, nothing to compile before a cron job can call it.
+
+After a `players` run, follow it with the repair pass so the browser's own pool
+rows move onto the rosters the sync just established:
+
+```bash
+npm run sync:data -- players
+psql "$DATABASE_URL" -c 'select public.fsnv2_refresh_player_teams();'
+```
+
+See [Roster affiliations](#roster-affiliations-migration-0006) for why both
+halves are needed.
 
 ### Scheduled runs on Vercel
 

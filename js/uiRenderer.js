@@ -9,6 +9,7 @@
  * Dashboard / League / Team views in js/views/.
  */
 
+import { hasLiveSlate, opponentLabel } from './nflTeams.js';
 import { POSITIONS, ROSTER_SLOTS } from './types.js';
 import { positionalScarcity } from './vorMath.js';
 
@@ -298,7 +299,7 @@ export function renderRosterSelect(engine, ui) {
  * @param {HTMLElement} container
  * @param {'all'|'starters'|'bench'} scope
  */
-export function renderSlots(container, engine, teamId, scope = 'all') {
+export function renderSlots(container, engine, teamId, scope = 'all', week = null) {
   const roster = engine.rosterFor(teamId);
   const slots = ROSTER_SLOTS.filter((slot) =>
     scope === 'all' ? true : scope === 'starters' ? slot.starter : !slot.starter
@@ -310,6 +311,17 @@ export function renderSlots(container, engine, teamId, scope = 'all') {
     const player = playerId ? engine.playersById[playerId] : null;
     const row = document.createElement('div');
     row.className = `roster-slot${player ? '' : ' is-empty'}${slot.starter ? '' : ' is-bench'}`;
+
+    // The week's fixture, when the caller is showing a particular week. Live
+    // once the NFL slate has been synced; the round robin otherwise, which the
+    // dimmed class marks as provisional rather than a real fixture.
+    const fixture =
+      player && week
+        ? `<span class="roster-slot__opp${hasLiveSlate(week) ? '' : ' is-projected'}">${escapeHtml(
+            opponentLabel(player.team, week)
+          )}</span>`
+        : '';
+
     row.innerHTML = `
       <span class="roster-slot__label">${slot.label}</span>
       ${
@@ -317,7 +329,8 @@ export function renderSlots(container, engine, teamId, scope = 'all') {
           ? `<span class="roster-slot__player">
                ${badge(player.position, true)}
                <span class="roster-slot__name">${escapeHtml(player.name)}</span>
-               <span class="roster-slot__team">${player.team}</span>
+               <span class="roster-slot__team">${escapeHtml(player.team)}</span>
+               ${fixture}
              </span>
              <span class="roster-slot__pts">${player.projection}</span>`
           : '<span class="roster-slot__player roster-slot__player--empty">Empty</span><span class="roster-slot__pts">—</span>'
@@ -329,7 +342,7 @@ export function renderSlots(container, engine, teamId, scope = 'all') {
 
 export function renderRoster(engine, ui) {
   const teamId = ui.selectedTeamId;
-  renderSlots(dom.rosterSlots, engine, teamId, 'all');
+  renderSlots(dom.rosterSlots, engine, teamId, 'all', ui.week);
 
   const counts = engine.positionCounts(teamId);
   dom.rosterNeeds.innerHTML = `

@@ -4,6 +4,8 @@
  * Application shell.
  *
  *  - boots the draft engine and the pick clock
+ *  - reads the synced sports data (player pool, weekly projections, NFL slate)
+ *    out of Postgres, falling back to the offline pool in playerData.js
  *  - restores state from Supabase (falling back to localStorage, then a fresh
  *    draft) and persists every selection back to Postgres
  *  - registers the navigation flow:
@@ -13,6 +15,8 @@
 
 import { CONFIG } from './config.js';
 import { DraftEngine } from './draftEngine.js';
+import { createLiveData } from './liveData.js';
+import { setLiveSlate } from './nflTeams.js';
 import { DraftRepository, SeasonRepository } from './persistence.js';
 import { Router } from './router.js';
 import { SeasonEngine } from './seasonEngine.js';
@@ -116,8 +120,74 @@ async function init() {
   router.start();
   renderAll(engine, ui);
 
+  // Before any picks exist: swapping the pool resets the board.
+  await loadLiveData();
+
   await restoreDraft();
   await restoreSeason();
+}
+
+/**
+ * Moves the app off the static pool and onto the synced sports data.
+ *
+ * Three things come back from Postgres and each one replaces a placeholder:
+ *
+ *   fsnv2_players       the draft pool — the same players, but on the roster
+ *                       the sync established rather than the one hard-coded in
+ *                       playerData.js months ago.
+ *   fsnv2_projections   real per-week fantasy points, replacing the
+ *                       season-total-over-17 estimate.
+ *   fsnv2_nfl_schedule  the real slate, replacing the synthetic round robin
+ *                       behind the "@ MIA" / "vs NYJ" tags.
+ *
+ * Every one of them is optional. A disabled, unreachable or empty database
+ * leaves the corresponding fallback in place and the app runs exactly as it did
+ * before — which is what `npm run dev` with no credentials does.
+ */
+async function loadLiveData() {
+  if (!CONFIG.sportsData.enabled || !repo.enabled) return false;
+
+  const bundle = await repo.liveBundle({
+    season: CONFIG.sportsData.season,
+    scoringFormat: CONFIG.sportsData.scoringFormat
+  });
+  if (!bundle) {
+    toast('Live data unavailable — using the offline player pool.', 'warn');
+    return false;
+  }
+
+  const live = createLiveData(bundle);
+
+  if (live.pool.length) engine.usePlayerPool(live.pool);
+  if (live.slate.size) setLiveSlate(live.slate);
+  if (live.projectionWeeks.length) {
+    season.setLiveProjections((player, week) => live.weeklyPoints(player, week));
+  }
+
+  if (!live.pool.length && !live.slate.size) {
+    toast('No synced data yet — using the offline player pool.', 'info');
+    return false;
+  }
+
+  // Open on a week the sync actually covers. The league's own week 1 is not
+  // the NFL's — a season joined in progress has real data for week 3 and
+  // nothing for weeks 1-2 — so landing on week 1 would show the round-robin
+  // placeholder even though live numbers were just loaded. Only done while the
+  // season is still unplayed; once a week has been simulated, the season's own
+  // position wins.
+  const covered = live.projectionWeeks.filter((week) => week >= 1 && week <= season.weeks);
+  if (covered.length && season.currentWeek === 1 && !season.isWeekPlayed(1)) {
+    ui.week = covered[0];
+  }
+
+  const weeks = live.projectionWeeks;
+  toast(
+    `Live data: ${live.pool.length} players, ${live.counts.games} games` +
+      (weeks.length ? `, projections for week ${weeks.join(', ')}` : ''),
+    'success'
+  );
+  renderAll(engine, ui);
+  return true;
 }
 
 /**

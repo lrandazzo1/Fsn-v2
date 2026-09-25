@@ -9,11 +9,16 @@
  * abbreviation in the team's colour *behind* the image, so a failed load falls
  * back to a coloured chip instead of a broken-image icon.
  *
- * The 14-week opponent schedule is synthetic, exactly like the projections in
- * playerData.js: a 32-team round robin whose rounds are drawn by the same
- * seeded shuffle the league schedule uses. It is stable across reloads, gives
- * every team an opponent every week, and is only ever used as display context
- * next to a player's name ("@ MIA", "vs NYJ").
+ * Opponents come from the real NFL slate whenever the sports-data sync has it:
+ * app.js reads `fsnv2_nfl_schedule` on boot and installs the result through
+ * `setLiveSlate()`. Any week the sync has not stored falls back to a synthetic
+ * 32-team round robin drawn by the same seeded shuffle the league schedule
+ * uses — stable across reloads, an opponent for every team every week, and only
+ * ever used as display context next to a player's name ("@ MIA", "vs NYJ").
+ *
+ * `hasLiveSlate(week)` says which of the two a given week is being served by,
+ * so the UI can label a synthetic opponent honestly rather than passing it off
+ * as a real fixture.
  */
 
 import { lcgShuffle, roundRobinRounds } from './seasonEngine.js';
@@ -89,6 +94,28 @@ export function teamLogoUrl(abbr) {
  */
 let slate = null;
 
+/**
+ * The real slate, once `fsnv2_nfl_schedule` has been read. Same shape as
+ * `slate`, but only holds the weeks the sync has actually stored — a season
+ * three weeks old has three. Weeks it does not cover fall through to the
+ * synthetic round robin below, so the UI never shows a blank opponent.
+ * @type {Map<number, Record<string, {opponent: string, home: boolean}>>|null}
+ */
+let liveSlate = null;
+
+/**
+ * Installs the synced NFL schedule as the opponent source.
+ * @param {Map<number, Record<string, {opponent: string, home: boolean}>>|null} byWeek
+ */
+export function setLiveSlate(byWeek) {
+  liveSlate = byWeek && byWeek.size ? byWeek : null;
+}
+
+/** True when a given week's opponents come from the provider, not the round robin. */
+export function hasLiveSlate(week) {
+  return Boolean(liveSlate && liveSlate.has(Number(week)));
+}
+
 function buildSlate(weeks = 14) {
   const rounds = roundRobinRounds(NFL_ABBRS);
   const order = lcgShuffle(rounds.length, NFL_SCHEDULE_SEED);
@@ -114,6 +141,9 @@ function buildSlate(weeks = 14) {
  * @returns {{opponent: string, home: boolean}|null}
  */
 export function nflOpponent(abbr, week) {
+  const live = liveSlate?.get(Number(week))?.[abbr];
+  if (live) return live;
+
   if (!slate) slate = buildSlate();
   return slate.get(week)?.[abbr] || null;
 }

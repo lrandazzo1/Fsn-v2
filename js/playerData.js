@@ -1,12 +1,21 @@
 /**
  * playerData.js
  * -----------------------------------------------------------------------------
- * The raw player pool. Rows are compact tuples to keep the file readable:
+ * The OFFLINE FALLBACK player pool. Rows are compact tuples to keep the file
+ * readable:
  *
  *   [ name, position, nflTeam, projectedPoints ]
  *
- * Projections are synthetic sample data for demo/testing purposes — swap this
- * module for a fetch() against your projections API and nothing else changes.
+ * This is no longer the app's primary source. app.js reads the pool out of
+ * `fsnv2.players` on boot (see js/liveData.js), and only falls back here when
+ * Supabase is disabled, unreachable, or has not been synced yet — which is what
+ * `npm run dev` with no credentials does, and what the Node test-suite uses.
+ *
+ * Because it is a fallback, the teams below go stale between syncs: a mid-season
+ * trade shows up in Postgres immediately and here only when someone edits this
+ * file. Treat a disagreement between the two as this file being out of date, not
+ * the database. The projections are synthetic sample numbers throughout; the
+ * real per-week numbers come from `fsnv2_projections`.
  */
 
 /** @type {Array<[string, string, string, number]>} */
@@ -19,7 +28,7 @@ export const RAW_PLAYERS = [
   ['Patrick Mahomes', 'QB', 'KC', 360],
   ['Joe Burrow', 'QB', 'CIN', 355],
   ['C.J. Stroud', 'QB', 'HOU', 340],
-  ['Kyler Murray', 'QB', 'ARI', 335],
+  ['Kyler Murray', 'QB', 'MIN', 335],
   ['Justin Herbert', 'QB', 'LAC', 330],
   ['Brock Purdy', 'QB', 'SF', 325],
   ['Dak Prescott', 'QB', 'DAL', 322],
@@ -60,7 +69,7 @@ export const RAW_PLAYERS = [
   ['Alvin Kamara', 'RB', 'NO', 230],
   ['James Conner', 'RB', 'ARI', 228],
   ['Joe Mixon', 'RB', 'HOU', 226],
-  ['David Montgomery', 'RB', 'DET', 215],
+  ['David Montgomery', 'RB', 'HOU', 215],
   ['Brian Robinson Jr.', 'RB', 'WAS', 210],
   ['Tony Pollard', 'RB', 'TEN', 208],
   ['Aaron Jones', 'RB', 'MIN', 206],
@@ -235,6 +244,11 @@ export const RAW_PLAYERS = [
 /**
  * Normalises the tuple rows into Player-shaped objects with stable ids.
  * VOR fields are left at their defaults — `vorMath.enrichPlayers()` fills them.
+ *
+ * The `p-0000` ids are what the draft persists, so they must stay stable: never
+ * reorder RAW_PLAYERS, only append. They are also the ids the synced rows are
+ * matched against in Postgres, by name and position rather than by id.
+ *
  * @returns {import('./types.js').Player[]}
  */
 export function loadPlayers() {

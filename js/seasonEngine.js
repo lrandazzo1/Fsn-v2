@@ -190,6 +190,12 @@ export class SeasonEngine {
     /** `${week}:${playerId}` -> points scored that week. */
     this.scores = new Map();
 
+    /**
+     * Set by setLiveProjections() once the sync's numbers have been read.
+     * @type {((player: Object, week: number) => number|null)|null}
+     */
+    this.liveProjections = null;
+
     this.generate();
   }
 
@@ -265,16 +271,46 @@ export class SeasonEngine {
     });
   }
 
-  /** A player's projected points for one week (season projection / 17 games). */
-  weeklyProjection(player) {
+  /**
+   * Installs the synced provider projections as the weekly points source.
+   *
+   * @param {((player: Object, week: number) => number|null)|null} lookup
+   *   returns the real points for that player/week, or null when the provider
+   *   has not published it — the season projection is then used as before.
+   */
+  setLiveProjections(lookup) {
+    this.liveProjections = typeof lookup === 'function' ? lookup : null;
+  }
+
+  /**
+   * A player's projected points for one week.
+   *
+   * The provider's own weekly number when the sync has it, otherwise the
+   * evenly-spread season projection (season total / 17 games). `week` defaults
+   * to the week the season is on so the older single-argument callers keep
+   * working unchanged.
+   *
+   * @param {import('./types.js').Player|null} player
+   * @param {number} [week]
+   */
+  weeklyProjection(player, week = this.currentWeek) {
     if (!player) return 0;
+
+    if (this.liveProjections) {
+      const live = this.liveProjections(player, week);
+      if (typeof live === 'number' && Number.isFinite(live)) return round1(live);
+    }
     return round1(player.projection / GAMES_PER_SEASON);
   }
 
-  /** Summed weekly projection of a team's starters. */
-  projectedTotal(teamId) {
+  /**
+   * Summed weekly projection of a team's starters, for a given week. The week
+   * matters now that the provider publishes a different number per week; it
+   * defaults to the week the season is on for the older callers.
+   */
+  projectedTotal(teamId, week = this.currentWeek) {
     return round1(
-      this.lineup(teamId).reduce((sum, entry) => sum + this.weeklyProjection(entry.player), 0)
+      this.lineup(teamId).reduce((sum, entry) => sum + this.weeklyProjection(entry.player, week), 0)
     );
   }
 
@@ -293,7 +329,7 @@ export class SeasonEngine {
     if (game && game.status === 'final') {
       return game.teamAId === teamId ? game.teamAScore : game.teamBScore;
     }
-    return this.projectedTotal(teamId);
+    return this.projectedTotal(teamId, week);
   }
 
   /**
@@ -306,7 +342,9 @@ export class SeasonEngine {
       if (game.teamAScore === game.teamBScore) return 0.5;
       return game.teamAScore > game.teamBScore ? 1 : 0;
     }
-    return winProbability(this.projectedTotal(game.teamAId) - this.projectedTotal(game.teamBId));
+    return winProbability(
+      this.projectedTotal(game.teamAId, game.week) - this.projectedTotal(game.teamBId, game.week)
+    );
   }
 
   /* ----------------------------------------------------------- simulation */
@@ -334,7 +372,7 @@ export class SeasonEngine {
         if (!player) return;
 
         const slot = ROSTER_SLOTS.find((entry) => entry.key === slotKey);
-        const projected = this.weeklyProjection(player);
+        const projected = this.weeklyProjection(player, week);
         const swing = VOLATILITY[player.position] ?? 0.35;
         const points = Math.max(0, round1(projected * (1 + swing * noise(random))));
 
