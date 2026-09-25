@@ -313,6 +313,77 @@ export async function handleSyncRequest(
   return json(body, body.ok ? 200 : 500);
 }
 
-export default function handler(request: Request): Promise<Response> {
-  return handleSyncRequest(request);
+/* ------------------------------------------------------- the two signatures -- */
+
+/**
+ * Vercel's Node runtime may hand a function either a Web `Request` or a
+ * Node-style `(req, res)` pair, and which one you get is not something the
+ * deployment tells you — the first deployed version of this route assumed `Request`
+ * and died on `request.headers.get(...)` before it could log anything. So accept
+ * both: the Web object is used directly, and a Node request is adapted into one.
+ */
+interface NodeRequestLike {
+  url?: string;
+  method?: string;
+  headers: Record<string, string | string[] | undefined>;
+}
+
+interface NodeResponseLike {
+  statusCode: number;
+  setHeader(name: string, value: string): void;
+  end(body?: string): void;
+}
+
+function isWebRequest(value: unknown): value is Request {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as Request).url === 'string' &&
+    typeof (value as { headers?: { get?: unknown } }).headers?.get === 'function'
+  );
+}
+
+function toWebRequest(request: NodeRequestLike): Request {
+  const host = request.headers['x-forwarded-host'] ?? request.headers.host ?? 'localhost';
+  const proto = request.headers['x-forwarded-proto'] ?? 'https';
+  const base = `${Array.isArray(proto) ? proto[0] : proto}://${Array.isArray(host) ? host[0] : host}`;
+
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(request.headers)) {
+    if (value === undefined) continue;
+    headers.set(name, Array.isArray(value) ? value.join(', ') : value);
+  }
+
+  return new Request(new URL(request.url ?? '/', base), {
+    method: request.method ?? 'GET',
+    headers
+  });
+}
+
+async function send(response: NodeResponseLike, result: Response): Promise<void> {
+  response.statusCode = result.status;
+  result.headers.forEach((value, name) => response.setHeader(name, value));
+  response.end(await result.text());
+}
+
+/** Never throws: a crash here would surface as FUNCTION_INVOCATION_FAILED with
+ *  no body and no stack, which is the hardest possible thing to debug. */
+async function run(request: Request): Promise<Response> {
+  try {
+    return await handleSyncRequest(request);
+  } catch (error) {
+    const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
+    process.stderr.write(`/api/sync crashed: ${detail}\n`);
+    return json({ ok: false, error: 'sync route failed', detail: (error as Error).message }, 500);
+  }
+}
+
+export default async function handler(
+  request: Request | NodeRequestLike,
+  response?: NodeResponseLike
+): Promise<Response | undefined> {
+  const result = await run(isWebRequest(request) ? request : toWebRequest(request));
+  if (!response) return result;
+  await send(response, result);
+  return undefined;
 }

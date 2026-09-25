@@ -623,6 +623,38 @@ async function phaseRoute(): Promise<void> {
     assert.equal(memory.calls.length, 0, 'nothing should have been written');
   });
 
+  await check('the handler answers a Node-style (req, res) invocation too', async () => {
+    // Vercel's Node runtime may call either signature, and the first deployed
+    // version of this route only handled Request — it crashed before logging.
+    const { default: handler } = await import('../lib/api/syncRoute.ts');
+
+    let ended = '';
+    const headers: Record<string, string> = {};
+    const response = {
+      statusCode: 0,
+      setHeader: (name: string, value: string) => {
+        headers[name] = value;
+      },
+      end: (body?: string) => {
+        ended = body ?? '';
+      }
+    };
+
+    const returned = await handler(
+      {
+        url: '/api/sync?task=nonsense',
+        method: 'GET',
+        headers: { host: 'fsn.example.com', 'x-forwarded-proto': 'https' }
+      },
+      response
+    );
+
+    assert.equal(returned, undefined, 'a Node-style call answers through res, not a return value');
+    assert.equal(response.statusCode, 400);
+    assert.match(headers['content-type'] ?? '', /application\/json/);
+    assert.match((JSON.parse(ended) as { error: string }).error, /Unknown task "nonsense"/);
+  });
+
   await check('running out of time reports the tasks that never started', async () => {
     const memory = createMemoryRpc();
     const service = fixtureService({ rpc: memory.rpc });

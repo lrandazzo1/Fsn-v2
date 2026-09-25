@@ -1478,8 +1478,43 @@ async function handleSyncRequest(request, options = {}) {
   });
   return json(body, body.ok ? 200 : 500);
 }
-function handler(request) {
-  return handleSyncRequest(request);
+function isWebRequest(value) {
+  return typeof value === "object" && value !== null && typeof value.url === "string" && typeof value.headers?.get === "function";
+}
+function toWebRequest(request) {
+  const host = request.headers["x-forwarded-host"] ?? request.headers.host ?? "localhost";
+  const proto = request.headers["x-forwarded-proto"] ?? "https";
+  const base = `${Array.isArray(proto) ? proto[0] : proto}://${Array.isArray(host) ? host[0] : host}`;
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(request.headers)) {
+    if (value === void 0) continue;
+    headers.set(name, Array.isArray(value) ? value.join(", ") : value);
+  }
+  return new Request(new URL(request.url ?? "/", base), {
+    method: request.method ?? "GET",
+    headers
+  });
+}
+async function send(response, result) {
+  response.statusCode = result.status;
+  result.headers.forEach((value, name) => response.setHeader(name, value));
+  response.end(await result.text());
+}
+async function run(request) {
+  try {
+    return await handleSyncRequest(request);
+  } catch (error) {
+    const detail = error instanceof Error ? error.stack ?? error.message : String(error);
+    process.stderr.write(`/api/sync crashed: ${detail}
+`);
+    return json({ ok: false, error: "sync route failed", detail: error.message }, 500);
+  }
+}
+async function handler(request, response) {
+  const result = await run(isWebRequest(request) ? request : toWebRequest(request));
+  if (!response) return result;
+  await send(response, result);
+  return void 0;
 }
 export {
   handler as default,
