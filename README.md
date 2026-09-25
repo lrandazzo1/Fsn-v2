@@ -58,7 +58,7 @@ scripts/build-api.mjs   esbuild bundle for that one function
 vercel.json             Build + cron schedule + function limits
 scripts/sync-data.ts    Sync CLI (npm run sync:data)
 scripts/test-sync-data.ts  Sync verification CLI (npm run test:sync-data)
-supabase/migrations/    Schema + RPC migrations (0004 adds the sync tables, 0005 the derivations)
+supabase/migrations/    Schema + RPC migrations (0004 adds the sync tables, 0005 the derivations, 0006 the team refresh)
 tests/engine.test.mjs   41 assertions: snake order, clock expiry, rosters, hydration
 tests/season.test.mjs   42 assertions: schedule, simulation, standings, hydration
 tests/draft-sim.test.mjs Full 15-round simulation + optional database round-trip
@@ -473,9 +473,9 @@ run in order and stop starting new work near the function's time limit, reportin
 | `CRON_SECRET` | Vercel Cron sends it as `Authorization: Bearer $CRON_SECRET`; the route requires it once set, and warns in its response while it is missing |
 | `SUPABASE_URL` | optional — defaults to the project in `js/config.js` |
 
-Migrations `0003`, `0004` and `0005` must be applied to the Supabase project
-before the first run, or every write fails with `Could not find the function
-public.fsnv2_sync_players`.
+Migrations `0003`, `0004`, `0005` and `0006` must be applied to the Supabase
+project before the first run, or every write fails with `Could not find the
+function public.fsnv2_sync_players`.
 
 ### Mapping
 
@@ -513,6 +513,36 @@ does depend on sync order — players and schedules before projections and box
 scores — which is the order the weekly bundle already runs in. A row whose game
 or player has not synced yet keeps a null rather than failing, and a re-run never
 trades a derived value back for the provider's null.
+
+### Team affiliations
+
+A player's club is whatever roster the sync read him from — never the `team`
+field on his own record, which a vendor leaves pointing at his former club for a
+while after a trade. `fetchPlayers` reads `getNFLTeams?rosters=true` and takes
+the enclosing franchise's abbreviation and id (only the flat `getNFLPlayerList`
+fallback, which has no enclosing roster, uses the entry's own fields), and
+`fsnv2_sync_players` overwrites `team` and `nfl_team_external_id` on every run
+rather than coalescing them.
+
+Two things then keep the rest of the app in step (migration `0006`):
+
+| | |
+| --- | --- |
+| `fsnv2_refresh_player_teams()` | copies the current team, NFL team id and bye week onto the synthetic `js/playerData.js` rows (provider null), matched on normalised name + position. `fsnv2_sync_players` calls it at the end of every player sync, and it can be run on its own as a patch: `select public.fsnv2_refresh_player_teams();` |
+| `fsnv2_upsert_players` | the browser re-pushes its local pool on every page load; it now resolves each row's `team` against the synced pool first, so a static file can never write a former club back over a synced one |
+
+`fsnv2_team_abbr()` gives every franchise one spelling on the way in — Tank01
+sends Washington as `WSH`, other feeds send `JAC`, `OAK` or `LA` — because the
+UI keys its colours, logos and opponents on the 32 abbreviations in
+`js/nflTeams.js`, and an abbreviation it does not know renders as a grey chip
+with no logo. The same alias table lives in `lib/services/normalize.ts` (new
+rows), in the SQL function (rows already stored) and in `js/nflTeams.js`
+(rendering, via `normalizeAbbr()`).
+
+The team badge itself is `teamLogoHtml()` in `js/nflTeams.js`, shared by the
+matchup board, the player pool, the roster slots and the Team page, and driven
+entirely by the player's current `team` — so a player who changes clubs shows
+his new badge everywhere as soon as the sync lands.
 
 > **Why `nfl_matchups` and not `matchups`?** `fsnv2.matchups` is the *fantasy*
 > head-to-head schedule: league-scoped, integer franchise slots 1-12, with the

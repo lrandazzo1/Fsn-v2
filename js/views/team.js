@@ -9,6 +9,7 @@
  */
 
 import { ROSTER_SLOTS } from '../types.js';
+import { teamLogoHtml } from '../nflTeams.js';
 import {
   badge,
   escapeHtml,
@@ -147,13 +148,13 @@ export function createTeamView({ engine, season, ui, router }) {
             return `
               <div class="matchup__row">
                 <span class="matchup__player ${minePts >= themPts ? 'is-win' : ''}">
-                  ${me ? escapeHtml(me.name) : '<em>empty</em>'}
+                  ${me ? `${teamLogoHtml(me.team)}${escapeHtml(me.name)}` : '<em>empty</em>'}
                   <b>${me ? minePts.toFixed(1) : '—'}</b>
                 </span>
                 <span class="matchup__slot">${badge(slot.label === 'FLEX' ? 'FLEX' : slot.label, true)}</span>
                 <span class="matchup__player is-right ${themPts > minePts ? 'is-win' : ''}">
                   <b>${them ? themPts.toFixed(1) : '—'}</b>
-                  ${them ? escapeHtml(them.name) : '<em>empty</em>'}
+                  ${them ? `${escapeHtml(them.name)}${teamLogoHtml(them.team)}` : '<em>empty</em>'}
                 </span>
               </div>`;
           })

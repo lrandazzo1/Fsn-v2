@@ -243,6 +243,64 @@ async function phaseMapping(): Promise<void> {
     }
   });
 
+  await check('a traded player takes the roster he is on, not the team on his record', async () => {
+    // The bug this guards: Tank01 leaves the stale club on a traded player's own
+    // record for a while, so a profile kept showing a former team. The roster he
+    // appears on is the affiliation. `WSH` also has to land as `WAS`, the
+    // abbreviation the app keys its colours, logos and slate on.
+    const payload = {
+      statusCode: 200,
+      body: [
+        {
+          teamID: '21',
+          teamAbv: 'MIN',
+          teamCity: 'Minnesota',
+          teamName: 'Vikings',
+          byeWeeks: { '2026': ['6'] },
+          Roster: {
+            '3917315': {
+              playerID: '3917315',
+              longName: 'Kyler Murray',
+              pos: 'QB',
+              team: 'ARI', // stale on the player record
+              teamID: '22', // stale too
+              jerseyNum: '1'
+            }
+          }
+        },
+        {
+          teamID: '28',
+          teamAbv: 'WSH',
+          teamCity: 'Washington',
+          teamName: 'Commanders',
+          byeWeeks: { '2026': ['9'] },
+          Roster: [
+            { playerID: '4685702', longName: 'Jayden Daniels', pos: 'QB', team: 'WSH', teamID: '28' }
+          ]
+        }
+      ]
+    };
+
+    const provider = resolveProvider({
+      env: fixtureEnv({ provider: 'tank01', baseUrl: 'https://sports-data.test' }),
+      logger: silentLogger,
+      fetch: async () =>
+        new Response(JSON.stringify(payload), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        })
+    });
+
+    const players = await provider.fetchPlayers(fixtureContext());
+    const murray = need(players.find((player) => player.external_id === '3917315'), 'Kyler Murray');
+    assert.equal(murray.team, 'MIN', 'the roster he is on wins over his own record');
+    assert.equal(murray.nfl_team_external_id, '21');
+    assert.equal(murray.bye_week, 6, 'the bye week comes with the new club');
+
+    const daniels = need(players.find((player) => player.external_id === '4685702'), 'Jayden Daniels');
+    assert.equal(daniels.team, 'WAS', 'WSH should canonicalise to WAS');
+  });
+
   await check('getNFLProjections → projections, stats flattened, defenses included', async () => {
     const rows = await fixtureProvider().fetchProjections(fixtureContext(WEEK));
     assert.equal(rows.length, 8); // 6 skill players + 2 team defenses
