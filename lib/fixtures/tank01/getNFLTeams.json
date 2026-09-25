@@ -1,0 +1,50 @@
+{
+  "statusCode": 200,
+  "body": [
+    {
+      "teamID": "6",
+      "teamAbv": "CHI",
+      "teamCity": "Chicago",
+      "teamName": "Bears",
+      "conference": "National Football Conference",
+      "conferenceAbv": "NFC",
+      "division": "North",
+      "byeWeeks": { "2026": ["7"], "2025": ["5"] },
+      "espnLogo1": "https://a.espncdn.com/i/teamlogos/nfl/500/chi.png",
+      "nflComLogo1": "https://static.www.nfl.com/t_headshot_desktop/league/api/clubs/logos/CHI"
+    },
+    {
+      "teamID": "18",
+      "teamAbv": "MIN",
+      "teamCity": "Minnesota",
+      "teamName": "Vikings",
+      "conference": "National Football Conference",
+      "conferenceAbv": "NFC",
+      "division": "North",
+      "byeWeeks": { "2026": ["6"] },
+      "espnLogo1": "https://a.espncdn.com/i/teamlogos/nfl/500/min.png"
+    },
+    {
+      "teamID": "12",
+      "teamAbv": "GB",
+      "teamCity": "Green Bay",
+      "teamName": "Packers",
+      "conference": "National Football Conference",
+      "conferenceAbv": "NFC",
+      "division": "North",
+      "byeWeeks": { "2026": ["10"] },
+      "espnLogo1": "https://a.espncdn.com/i/teamlogos/nfl/500/gb.png"
+    },
+    {
+      "teamID": "11",
+      "teamAbv": "DET",
+      "teamCity": "Detroit",
+      "teamName": "Lions",
+      "conference": "National Football Conference",
+      "conferenceAbv": "NFC",
+      "division": "North",
+      "byeWeeks": { "2026": ["8"] },
+      "espnLogo1": "https://a.espncdn.com/i/teamlogos/nfl/500/det.png"
+    }
+  ]
+}

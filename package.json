@@ -2,17 +2,26 @@
   "name": "fsn-v2-platform",
   "version": "0.1.0",
   "private": true,
-  "description": "FSN v2 \u2014 Draft & League Engine: static web app with a VOR draft engine and Supabase-backed persistence.",
+  "description": "FSN v2 — Draft & League Engine: static web app with a VOR draft engine, a background sports-data sync service, and Supabase-backed persistence.",
   "type": "module",
   "scripts": {
     "dev": "python3 -m http.server 8000",
+    "build": "npm run build:api",
+    "build:api": "node scripts/build-api.mjs",
     "test": "node tests/engine.test.mjs && node tests/season.test.mjs && node tests/draft-sim.test.mjs",
     "test:engine": "node tests/engine.test.mjs",
     "test:sim": "node tests/draft-sim.test.mjs",
     "test:db": "node tests/draft-sim.test.mjs --db",
-    "test:season": "node tests/season.test.mjs"
+    "test:season": "node tests/season.test.mjs",
+    "sync:data": "node scripts/sync-data.ts",
+    "test:sync-data": "node scripts/test-sync-data.ts",
+    "typecheck": "tsc -p tsconfig.json"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "esbuild": "^0.28.2"
   }
 }

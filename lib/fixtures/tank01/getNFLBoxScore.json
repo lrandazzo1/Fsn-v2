@@ -1,0 +1,26 @@
+{
+  "statusCode": 200,
+  "body": {
+    "gameID": "20260913_GB@DET",
+    "gameStatus": "Scheduled",
+    "home": "DET",
+    "away": "GB",
+    "playerStats": {
+      "4429795": {
+        "playerID": "4429795",
+        "longName": "Jahmyr Gibbs",
+        "teamAbv": "DET",
+        "teamID": "11",
+        "fantasyPoints": "0.0",
+        "Rushing": {
+          "carries": "0",
+          "rushYds": "0",
+          "rushTD": "0"
+        },
+        "snapCounts": {
+          "offSnaps": "0"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,168 @@
+{
+  "statusCode": 200,
+  "body": [
+    {
+      "teamID": "6",
+      "teamAbv": "CHI",
+      "teamCity": "Chicago",
+      "teamName": "Bears",
+      "conference": "National Football Conference",
+      "division": "North",
+      "byeWeeks": { "2026": ["7"] },
+      "Roster": {
+        "4430807": {
+          "playerID": "4430807",
+          "longName": "Caleb Williams",
+          "espnName": "Caleb Williams",
+          "pos": "QB",
+          "team": "CHI",
+          "teamID": "6",
+          "jerseyNum": "18",
+          "age": "24",
+          "exp": "3",
+          "school": "USC",
+          "injury": { "designation": "", "description": "", "injReturnDate": "" }
+        },
+        "4259545": {
+          "playerID": "4259545",
+          "longName": "D'Andre Swift",
+          "pos": "RB",
+          "team": "CHI",
+          "teamID": "6",
+          "jerseyNum": "4",
+          "age": "27",
+          "exp": "7",
+          "school": "Georgia",
+          "injury": { "designation": "Questionable", "description": "groin" }
+        },
+        "17427": {
+          "playerID": "17427",
+          "longName": "Cairo Santos",
+          "pos": "PK",
+          "team": "CHI",
+          "teamID": "6",
+          "jerseyNum": "2",
+          "age": "34",
+          "exp": "12",
+          "school": "Tulane"
+        },
+        "5083041": {
+          "playerID": "5083041",
+          "longName": "Ozzy Trapilo",
+          "pos": "OL",
+          "team": "CHI",
+          "teamID": "6",
+          "jerseyNum": "70",
+          "school": "Boston College"
+        }
+      }
+    },
+    {
+      "teamID": "18",
+      "teamAbv": "MIN",
+      "teamCity": "Minnesota",
+      "teamName": "Vikings",
+      "division": "North",
+      "byeWeeks": { "2026": ["6"] },
+      "Roster": {
+        "4433971": {
+          "playerID": "4433971",
+          "longName": "J.J. McCarthy",
+          "pos": "QB",
+          "team": "MIN",
+          "teamID": "18",
+          "jerseyNum": "9",
+          "age": "23",
+          "exp": "2",
+          "school": "Michigan"
+        },
+        "4262921": {
+          "playerID": "4262921",
+          "longName": "Justin Jefferson",
+          "pos": "WR",
+          "team": "MIN",
+          "teamID": "18",
+          "jerseyNum": "18",
+          "age": "27",
+          "exp": "7",
+          "school": "LSU"
+        },
+        "4429205": {
+          "playerID": "4429205",
+          "longName": "Jordan Addison",
+          "pos": "WR",
+          "team": "MIN",
+          "teamID": "18",
+          "jerseyNum": "3",
+          "age": "24",
+          "exp": "4",
+          "school": "USC"
+        }
+      }
+    },
+    {
+      "teamID": "12",
+      "teamAbv": "GB",
+      "teamCity": "Green Bay",
+      "teamName": "Packers",
+      "division": "North",
+      "byeWeeks": { "2026": ["10"] },
+      "Roster": {
+        "4036378": {
+          "playerID": "4036378",
+          "longName": "Jordan Love",
+          "pos": "QB",
+          "team": "GB",
+          "teamID": "12",
+          "jerseyNum": "10",
+          "age": "27",
+          "exp": "7",
+          "school": "Utah State"
+        },
+        "4047365": {
+          "playerID": "4047365",
+          "longName": "Josh Jacobs",
+          "pos": "RB",
+          "team": "GB",
+          "teamID": "12",
+          "jerseyNum": "8",
+          "age": "28",
+          "exp": "8",
+          "school": "Alabama"
+        }
+      }
+    },
+    {
+      "teamID": "11",
+      "teamAbv": "DET",
+      "teamCity": "Detroit",
+      "teamName": "Lions",
+      "division": "North",
+      "byeWeeks": { "2026": ["8"] },
+      "Roster": {
+        "4429795": {
+          "playerID": "4429795",
+          "longName": "Jahmyr Gibbs",
+          "pos": "RB",
+          "team": "DET",
+          "teamID": "11",
+          "jerseyNum": "26",
+          "age": "24",
+          "exp": "4",
+          "school": "Alabama"
+        },
+        "4374302": {
+          "playerID": "4374302",
+          "longName": "Amon-Ra St. Brown",
+          "pos": "WR",
+          "team": "DET",
+          "teamID": "11",
+          "jerseyNum": "14",
+          "age": "27",
+          "exp": "6",
+          "school": "USC"
+        }
+      }
+    }
+  ]
+}

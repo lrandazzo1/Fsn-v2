@@ -1,0 +1,91 @@
+{
+  "statusCode": 200,
+  "body": {
+    "gameID": "20260913_CHI@MIN",
+    "gameStatus": "Completed",
+    "home": "MIN",
+    "away": "CHI",
+    "homePts": "24",
+    "awayPts": "20",
+    "playerStats": {
+      "4430807": {
+        "playerID": "4430807",
+        "longName": "Caleb Williams",
+        "teamAbv": "CHI",
+        "teamID": "6",
+        "fantasyPoints": "21.8",
+        "Passing": {
+          "passAttempts": "34",
+          "passCompletions": "23",
+          "passYds": "281",
+          "passTD": "2",
+          "int": "1"
+        },
+        "Rushing": {
+          "carries": "4",
+          "rushYds": "22",
+          "rushTD": "0"
+        },
+        "snapCounts": {
+          "offSnaps": "64",
+          "offSnapPct": "1.00",
+          "defSnaps": "0"
+        }
+      },
+      "4262921": {
+        "playerID": "4262921",
+        "longName": "Justin Jefferson",
+        "teamAbv": "MIN",
+        "teamID": "18",
+        "fantasyPoints": "24.6",
+        "Receiving": {
+          "targets": "12",
+          "receptions": "8",
+          "recYds": "126",
+          "recTD": "1"
+        },
+        "snapCounts": {
+          "offSnaps": "58",
+          "offSnapPct": "0.92"
+        }
+      },
+      "17427": {
+        "playerID": "17427",
+        "longName": "Cairo Santos",
+        "teamAbv": "CHI",
+        "teamID": "6",
+        "fantasyPoints": "9.0",
+        "Kicking": {
+          "fgMade": "2",
+          "fgAttempts": "2",
+          "xpMade": "2",
+          "fgLong": "48"
+        }
+      }
+    },
+    "DST": {
+      "home": {
+        "teamID": "18",
+        "teamAbv": "MIN",
+        "sacks": "3",
+        "defensiveInterceptions": "1",
+        "fumblesRecovered": "1",
+        "defTD": "1",
+        "safeties": "0",
+        "ptsAllowed": "20",
+        "ydsAllowed": "318"
+      },
+      "away": {
+        "teamID": "6",
+        "teamAbv": "CHI",
+        "sacks": "1",
+        "defensiveInterceptions": "0",
+        "fumblesRecovered": "0",
+        "defTD": "0",
+        "safeties": "0",
+        "ptsAllowed": "24",
+        "ydsAllowed": "402"
+      }
+    }
+  }
+}

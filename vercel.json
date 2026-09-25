@@ -1,0 +1,16 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run build:api",
+  "outputDirectory": ".",
+  "crons": [
+    {
+      "path": "/api/sync",
+      "schedule": "17 9 * * 2"
+    }
+  ],
+  "functions": {
+    "api/sync.js": {
+      "maxDuration": 60
+    }
+  }
+}
