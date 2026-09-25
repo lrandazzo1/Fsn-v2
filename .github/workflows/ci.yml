@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# A second push to the same branch supersedes the first — no point finishing a
+# run for a commit nobody is looking at any more.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22 is the floor in package.json engines; 24 is what Vercel builds on.
+        node-version: ['22', '24']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - run: npm ci
+
+      # typecheck -> build:api -> tests -> sync verification. The sync
+      # verification needs no credentials and no network: it replays the
+      # recorded payloads in lib/fixtures/tank01 and drives an in-memory stand-in
+      # for the fsnv2_sync_* RPCs. Its two live phases report as skipped here.
+      - run: npm run verify
+
+      # build:api regenerates api/sync.js, which is committed. If the bundle in
+      # the commit is stale this leaves the tree dirty, so fail loudly rather
+      # than let the deployed artifact drift from its source.
+      - name: Check the committed api/sync.js bundle is up to date
+        run: |
+          if ! git diff --exit-code -- api/sync.js; then
+            echo "::error file=api/sync.js::api/sync.js is out of date — run 'npm run build:api' and commit the result."
+            exit 1
+          fi

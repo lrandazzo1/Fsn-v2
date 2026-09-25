@@ -24,6 +24,13 @@ language sql immutable as $$
   end;
 $$;
 
+-- NOTE: the middle coalesce branch below, `(select roster_settings from fsnv2.leagues
+-- limit 0)`, is a scalar subquery over zero rows, so it always evaluates to NULL and
+-- coalesce always falls through to the literal default. It is inert, and it is
+-- reproduced here verbatim only because it is what the deployed function body contains
+-- (it entered production via an out-of-band dashboard edit). Dropping it is a no-op
+-- change, but it has to be dropped in production and in this file together or the
+-- drift comes straight back.
 create or replace function public.fsnv2_create_league(
   p_name            text,
   p_total_teams     integer default 12,
@@ -35,8 +42,10 @@ declare v_league fsnv2.leagues;
 begin
   insert into fsnv2.leagues (name, total_teams, scoring_type, roster_settings)
   values (
-    p_name, p_total_teams, p_scoring_type,
-    coalesce(p_roster_settings,
+    p_name,
+    p_total_teams,
+    p_scoring_type,
+    coalesce(p_roster_settings, (select roster_settings from fsnv2.leagues limit 0),
       jsonb_build_object(
         'starters', jsonb_build_object('QB',1,'RB',2,'WR',2,'TE',1,'FLEX',1,'DST',1,'K',1),
         'bench', 6,
@@ -82,8 +91,12 @@ begin
     insert into fsnv2.players (id, name, position, team, adp, stats)
     select id, name, position, team, adp, stats from rows
     on conflict (id) do update
-      set name = excluded.name, position = excluded.position, team = excluded.team,
-          adp = excluded.adp, stats = excluded.stats, updated_at = now()
+      set name = excluded.name,
+          position = excluded.position,
+          team = excluded.team,
+          adp = excluded.adp,
+          stats = excluded.stats,
+          updated_at = now()
     returning 1
   )
   select count(*) into v_count from upserted;
@@ -102,12 +115,12 @@ create or replace function public.fsnv2_record_pick(
 ) returns jsonb
 language plpgsql security definer set search_path = fsnv2, public as $$
 declare
-  v_draft       fsnv2.drafts;
-  v_total       integer;
-  v_round       integer;
-  v_expected    integer;
-  v_pick        fsnv2.draft_picks;
-  v_total_picks integer;
+  v_draft        fsnv2.drafts;
+  v_total        integer;
+  v_round        integer;
+  v_expected     integer;
+  v_pick         fsnv2.draft_picks;
+  v_total_picks  integer;
 begin
   select d.* into v_draft from fsnv2.drafts d where d.id = p_draft_id for update;
   if not found then

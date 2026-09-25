@@ -4,6 +4,8 @@
  * Application shell.
  *
  *  - boots the draft engine and the pick clock
+ *  - reads the synced sports data (player pool, weekly projections, NFL slate)
+ *    out of Postgres, falling back to the offline pool in playerData.js
  *  - restores state from Supabase (falling back to localStorage, then a fresh
  *    draft) and persists every selection back to Postgres
  *  - registers the navigation flow:
@@ -13,7 +15,8 @@
 
 import { CONFIG } from './config.js';
 import { DraftEngine } from './draftEngine.js';
-import { NflDataService, currentNflWeek, currentSeason } from './nflData.js';
+import { createLiveData } from './liveData.js';
+import { annotatePlayers, liveSlateWeeks, setLiveSlate } from './nflTeams.js';
 import { DraftRepository, SeasonRepository } from './persistence.js';
 import { Router } from './router.js';
 import { SeasonEngine } from './seasonEngine.js';
@@ -44,8 +47,8 @@ const ui = {
   route: 'home',
   /** Season state shared by the Matchup hub, the Team page and the dev bar. */
   week: 1,
-  /** The real NFL week the synced matchups are rendered for. */
-  nflWeek: 1,
+  /** The week whose NFL matchups are currently stamped onto the player pool. */
+  nflWeek: null,
   matchupMode: 'mine',
   matchupTeamId: CONFIG.league.userTeamId
 };
@@ -65,18 +68,6 @@ const season = new SeasonEngine({
 
 const repo = new DraftRepository({ onStatus: (status) => renderSyncStatus(status) });
 const seasonRepo = new SeasonRepository(repo);
-
-/**
- * The live Tank01 layer: real team codes and the real weekly slate, read back
- * out of the synced tables. Nothing here generates a schedule — when the reads
- * come back empty the UI shows '—' rather than an invented opponent.
- */
-const nflSeason = Number(CONFIG.nfl.season) || currentSeason();
-const nflData = new NflDataService({
-  repo,
-  season: nflSeason,
-  week: Number(CONFIG.nfl.week) || currentNflWeek(new Date(), nflSeason)
-});
 
 /** Guards the animated bot loop so two runs never overlap. */
 let simulation = { running: false, cancel: false };
@@ -126,68 +117,97 @@ async function init() {
 
   season.on('change', onSeasonChange);
   ui.week = season.currentWeek;
-  ui.nflWeek = ui.week;
 
   renderSyncStatus({ status: repo.enabled ? 'idle' : 'offline' });
   router.start();
   renderAll(engine, ui);
 
-  // Real teams and the real slate first: restoreDraft() pushes the pool up to
-  // Postgres, and it should push the provider's team codes, not the seed pool's.
-  await hydrateNflData();
+  // Before any picks exist: swapping the pool resets the board.
+  await loadLiveData();
+
   await restoreDraft();
   await restoreSeason();
 }
 
-/* ------------------------------------------------------------- live NFL data */
-
 /**
- * Loads the synced Tank01 payloads and corrects the pool with them:
+ * Moves the app off the static pool and onto the synced sports data.
  *
- *   fsnv2_nfl_teams     the teamID -> teamAbv dictionary
- *   fsnv2_nfl_schedule  the real weekly slate behind every "vs CLE" / "@ PIT"
- *   fsnv2_players       the rosters that decide what team a player is on
+ * Three things come back from Postgres and each one replaces a placeholder:
  *
- * Failures degrade honestly. An empty schedule means matchups read '—' until
- * the next sync; it never means a generated one is substituted.
+ *   fsnv2_players       the draft pool — the same players, but on the roster
+ *                       the sync established rather than the one hard-coded in
+ *                       playerData.js months ago.
+ *   fsnv2_projections   real per-week fantasy points, replacing the
+ *                       season-total-over-17 estimate.
+ *   fsnv2_nfl_schedule  the real slate behind every "@ MIA" / "vs NYJ" / "BYE"
+ *                       tag. There is no generated slate behind it: a week the
+ *                       sync has not stored reads '—' rather than inventing a
+ *                       fixture (see js/nflTeams.js).
+ *
+ * The pool and the projections are optional — a disabled, unreachable or empty
+ * database leaves the offline pool in place and the app runs as it did before,
+ * which is what `npm run dev` with no credentials does.
  */
-async function hydrateNflData() {
-  if (CONFIG.nfl.enabled === false) return;
+async function loadLiveData() {
+  if (!CONFIG.sportsData.enabled || !repo.enabled) return false;
 
-  try {
-    const summary = await nflData.load();
-    const { matched, corrected } = nflData.applyTeams(engine.playersById);
-    setNflWeek(ui.week);
-
-    if (!repo.enabled) return;
-    if (summary.players === 0) {
-      toast('No synced rosters yet — team codes are the seed pool until the next sync.', 'warn');
-    } else if (corrected > 0) {
-      toast(
-        `Live rosters applied — ${corrected} team code${corrected === 1 ? '' : 's'} corrected across ${matched} players.`,
-        'success'
-      );
-    }
-    if (summary.games === 0) {
-      toast(`No synced ${nflData.season} schedule — matchups will read “—”.`, 'warn');
-    }
-
-    renderAll(engine, ui);
-    refreshView();
-  } catch (error) {
-    toast(`Live NFL data unavailable: ${error.message}`, 'warn');
+  const bundle = await repo.liveBundle({
+    season: CONFIG.sportsData.season,
+    scoringFormat: CONFIG.sportsData.scoringFormat
+  });
+  if (!bundle) {
+    toast('Live data unavailable — using the offline player pool.', 'warn');
+    return false;
   }
+
+  const live = createLiveData(bundle);
+
+  if (live.pool.length) engine.usePlayerPool(live.pool);
+  if (live.slate.size) setLiveSlate(live.slate);
+  if (live.projectionWeeks.length) {
+    season.setLiveProjections((player, week) => live.weeklyPoints(player, week));
+  }
+
+  if (!live.pool.length && !live.slate.size) {
+    toast('No synced data yet — using the offline player pool.', 'info');
+    return false;
+  }
+
+  // Open on a week the sync actually covers. The league's own week 1 is not
+  // the NFL's — a season joined in progress has real data for week 3 and
+  // nothing for weeks 1-2 — so landing on week 1 would show '—' against every
+  // player even though live numbers were just loaded. Only done while the
+  // season is still unplayed; once a week has been simulated, the season's own
+  // position wins.
+  const covered = [...new Set([...live.projectionWeeks, ...liveSlateWeeks()])]
+    .filter((week) => week >= 1 && week <= season.weeks)
+    .sort((a, b) => a - b);
+  if (covered.length && season.currentWeek === 1 && !season.isWeekPlayed(1)) {
+    ui.week = covered[0];
+  }
+
+  // Stamp {player.team, player.opponent} for that week, so the lineup and bench
+  // components read them straight off the payload.
+  setNflWeek(ui.week);
+
+  const weeks = live.projectionWeeks;
+  toast(
+    `Live data: ${live.pool.length} players, ${live.counts.games} games` +
+      (weeks.length ? `, projections for week ${weeks.join(', ')}` : ''),
+    'success'
+  );
+  renderAll(engine, ui);
+  return true;
 }
 
 /**
- * Stamps `{ player.team, player.opponent }` for a week onto every player, so the
- * lineup and bench components read them straight off the payload. The week is
- * the one on screen — fantasy week N is NFL week N throughout this app.
+ * Stamps every player with the NFL matchup for a week — fantasy week N is NFL
+ * week N throughout this app. The week-aware views re-stamp when their own
+ * selector moves; this is the boot-time and pool-swap path.
  */
 function setNflWeek(week) {
-  const target = Number(week) || nflData.week;
-  ui.nflWeek = target;
-  nflData.annotate(engine.playersById, target);
+  ui.nflWeek = Number(week) || 1;
+  annotatePlayers(engine.playersById, ui.nflWeek);
 }
 
 /**
@@ -366,8 +386,7 @@ function onRouteChange({ name }) {
 }
 
 function refreshView() {
-  // The week on screen can have changed since the last stamp (the Matchup hub
-  // and the Team page both own a week selector).
+  // The week on screen can have moved since the last stamp.
   if (ui.nflWeek !== ui.week) setNflWeek(ui.week);
   if (ui.route === 'home') views.home?.render();
   else if (ui.route === 'league') views.league?.render();
@@ -599,4 +618,4 @@ if (document.readyState === 'loading') {
 }
 
 // Exposed for console tinkering / integration tests.
-window.FSN = { engine, season, repo, seasonRepo, nflData, ui, get router() { return router; } };
+window.FSN = { engine, season, repo, seasonRepo, ui, get router() { return router; } };

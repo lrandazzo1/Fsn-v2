@@ -24,15 +24,14 @@ import {
 import {
   NFL_ABBRS,
   annotatePlayers,
-  clearNflSchedule,
-  hasNflSchedule,
+  hasLiveSlate,
   isByeWeek,
   nflOpponent,
-  normalizeTeamAbbr,
+  normalizeAbbr,
   opponentLabel,
-  setNflSchedule
+  setLiveSlate
 } from '../js/nflTeams.js';
-import { NflDataService, playerKey } from '../js/nflData.js';
+import { buildLivePool, buildLiveSlate, playerKey } from '../js/liveData.js';
 
 /* --------------------------------------------------------------- harness -- */
 
@@ -467,7 +466,13 @@ test('recordLabel reads "W-L" and the streak counts the current run', () => {
   const { season } = draftedSeason();
   season.simulateThrough(4);
   const row = season.standings()[0];
-  assert.equal(season.recordLabel(row.teamId), `${row.wins}-${row.losses}`);
+  // Two teams can roll the same total, and recordLabel() then reads "W-L-T".
+  // Asserting "W-L" unconditionally made this test fail roughly one run in
+  // forty — the label was right and the assertion was not.
+  const expected = row.ties
+    ? `${row.wins}-${row.losses}-${row.ties}`
+    : `${row.wins}-${row.losses}`;
+  assert.equal(season.recordLabel(row.teamId), expected);
   assert.match(row.streak, /^[WLT]\d+$/);
 });
 
@@ -525,12 +530,19 @@ console.log('\nNFL opponent context');
  * `fsnv2_nfl_schedule` rows, and raw Tank01 `/getNFLGamesForWeek` entries. SF is
  * away at WAS, CLE is away at BAL; MIN and CHI have no game, so they are on bye.
  */
-const WEEK_1 = [
+const WEEK_1_GAMES = [
   { external_id: '20260910_SF@WAS', week: 1, home_team: 'WSH', away_team: 'SF' },
   { gameID: '20260913_CLE@BAL', gameWeek: 'Week 1', away: 'CLE', home: 'BAL' },
   { gameID: '20260913_JAC@PIT', gameWeek: 'Week 1' },
   { external_id: '20260913_SEA@NYJ', week: 1, home_team: 'NYJ', away_team: 'SEA' }
 ];
+
+/** Installs the week-1 slate; every test that needs it calls this first. */
+function loadWeek1() {
+  const slate = buildLiveSlate(WEEK_1_GAMES);
+  setLiveSlate(slate);
+  return slate;
+}
 
 test('all 32 franchises are known and every player team resolves', () => {
   const { engine } = draftedSeason();
@@ -540,7 +552,7 @@ test('all 32 franchises are known and every player team resolves', () => {
   });
 });
 
-test('the seed pool has Deebo Samuel on SF, not WAS', () => {
+test('the offline seed pool has Deebo Samuel on SF, not WAS', () => {
   const { engine } = draftedSeason();
   const deebo = Object.values(engine.playersById).find((p) => p.name === 'Deebo Samuel');
   assert.ok(deebo, 'Deebo Samuel should be in the pool');
@@ -548,40 +560,34 @@ test('the seed pool has Deebo Samuel on SF, not WAS', () => {
 });
 
 test('feed spellings fold onto our 32 franchise codes', () => {
-  assert.equal(normalizeTeamAbbr('WSH'), 'WAS');
-  assert.equal(normalizeTeamAbbr('JAC'), 'JAX');
-  assert.equal(normalizeTeamAbbr('OAK'), 'LV');
-  assert.equal(normalizeTeamAbbr('sf'), 'SF');
-  assert.equal(normalizeTeamAbbr('FA'), null);
-  assert.equal(normalizeTeamAbbr(''), null);
+  assert.equal(normalizeAbbr('WSH'), 'WAS');
+  assert.equal(normalizeAbbr('JAC'), 'JAX');
+  assert.equal(normalizeAbbr('OAK'), 'LV');
+  assert.equal(normalizeAbbr('sf'), 'SF');
+  assert.equal(normalizeAbbr(''), '');
+  assert.equal(normalizeAbbr(null), '');
 });
 
-test('with no schedule loaded nothing is invented — every label is "—"', () => {
-  clearNflSchedule();
-  assert.equal(hasNflSchedule(1), false);
+test('with no slate loaded nothing is invented — every label is "—"', () => {
+  setLiveSlate(null);
+  assert.equal(hasLiveSlate(1), false);
   NFL_ABBRS.forEach((abbr) => {
     assert.equal(nflOpponent(abbr, 1), null);
     assert.equal(opponentLabel(abbr, 1), '—');
-    assert.equal(isByeWeek(abbr, 1), false, 'an unloaded week is not a bye');
+    assert.equal(isByeWeek(abbr, 1), false, 'an unsynced week is not a bye');
   });
 });
 
-test('setNflSchedule reads both the fsnv2 and the raw Tank01 game shapes', () => {
-  const { weeks, games } = setNflSchedule(WEEK_1);
-  assert.deepEqual(weeks, [1]);
-  assert.equal(games, 4);
+test('buildLiveSlate reads both the fsnv2 and the raw Tank01 game shapes', () => {
+  const slate = loadWeek1();
+  assert.deepEqual([...slate.keys()], [1]);
+  assert.equal(Object.keys(slate.get(1)).length, 8, 'four games, both sides of each');
   // gameID alone: '20260913_JAC@PIT' is JAX away at PIT.
-  assert.deepEqual(nflOpponent('JAX', 1), {
-    opponent: 'PIT',
-    home: false,
-    gameId: '20260913_JAC@PIT',
-    kickoff: null,
-    status: null
-  });
+  assert.deepEqual(nflOpponent('JAX', 1), { opponent: 'PIT', home: false });
 });
 
 test('opponentLabel reads "@ HOME" on the road and "vs AWAY" at home', () => {
-  setNflSchedule(WEEK_1);
+  loadWeek1();
   assert.equal(opponentLabel('SF', 1), '@ WAS', 'SF is away at Washington');
   assert.equal(opponentLabel('WAS', 1), 'vs SF');
   assert.equal(opponentLabel('WSH', 1), 'vs SF', 'the feed spelling resolves too');
@@ -589,8 +595,8 @@ test('opponentLabel reads "@ HOME" on the road and "vs AWAY" at home', () => {
   assert.equal(opponentLabel('CLE', 1), '@ BAL');
 });
 
-test('both sides of a loaded game agree, and exactly one is at home', () => {
-  setNflSchedule(WEEK_1);
+test('both sides of a synced game agree, and exactly one is at home', () => {
+  loadWeek1();
   ['SF', 'WAS', 'CLE', 'BAL', 'JAX', 'PIT', 'SEA', 'NYJ'].forEach((abbr) => {
     const game = nflOpponent(abbr, 1);
     assert.ok(game, `${abbr} should have a week 1 game`);
@@ -601,18 +607,18 @@ test('both sides of a loaded game agree, and exactly one is at home', () => {
   });
 });
 
-test('a team with no game in a loaded week is on BYE', () => {
-  setNflSchedule(WEEK_1);
+test('a team with no game in a synced week is on BYE', () => {
+  loadWeek1();
   assert.equal(isByeWeek('MIN', 1), true);
   assert.equal(opponentLabel('MIN', 1), 'BYE');
   assert.equal(opponentLabel('CHI', 1), 'BYE');
-  // …but an unloaded week stays '—' rather than claiming 28 byes.
-  assert.equal(hasNflSchedule(2), false);
+  // …but an unsynced week stays '—' rather than claiming 24 byes.
+  assert.equal(hasLiveSlate(2), false);
   assert.equal(opponentLabel('MIN', 2), '—');
 });
 
 test('annotatePlayers stamps {team, opponent} onto the payload', () => {
-  setNflSchedule(WEEK_1);
+  loadWeek1();
   const players = [
     { name: 'Deebo Samuel', position: 'WR', team: 'SF' },
     { name: 'Terry McLaurin', position: 'WR', team: 'WSH' },
@@ -628,41 +634,36 @@ test('annotatePlayers stamps {team, opponent} onto the payload', () => {
       ['MIN', 'BYE', null, true]
     ]
   );
+
+  // A week the sync has not reached reports neither a game nor a bye.
+  annotatePlayers(players, 2);
+  assert.deepEqual(
+    players.map((p) => [p.opponent, p.onBye]),
+    [['—', false], ['—', false], ['—', false]]
+  );
 });
 
-test('applyTeams overwrites a stale seed team with the provider teamAbv', () => {
-  const service = new NflDataService({ repo: null, season: 2026, week: 1 });
-  service.players = [
-    // Tank01's own spellings: a suffix on the name, WSH for Washington, and a
-    // row that only carries teamID.
-    { name: 'Deebo Samuel Sr.', position: 'WR', team: 'SF', external_id: '4036335' },
-    { name: 'Terry McLaurin', position: 'WR', team: 'WSH', external_id: '3121422' },
-    { name: 'Justin Jefferson', position: 'WR', nfl_team_external_id: '18', external_id: '4262921' }
-  ];
-  service.teamIds = new Map([['18', 'MIN']]);
+test('the live pool takes its team from the synced row, not the seed', () => {
+  // The same player as the seed pool has him, but on the roster the sync
+  // established — and in Tank01's own spelling for Washington.
+  const pool = buildLivePool([
+    { id: 'p-0150', name: 'Deebo Samuel', position: 'WR', team: 'SF', stats: { projection: 180 } },
+    { id: 'p-0130', name: 'Terry McLaurin', position: 'WR', team: 'WSH', stats: { projection: 238 } },
+    { id: 'tank01-1', name: 'Bench Guy', position: 'WR', team: 'MIN', stats: {} },
+    { id: 'p-0200', name: 'Vikings D/ST', position: 'DEF', team: 'MIN', stats: { projection: 126 } }
+  ]);
 
-  const pool = {
-    a: { id: 'a', name: 'Deebo Samuel', position: 'WR', team: 'WAS' },
-    b: { id: 'b', name: 'Terry McLaurin', position: 'WR', team: 'WAS' },
-    c: { id: 'c', name: 'Justin Jefferson', position: 'WR', team: 'MIN' },
-    d: { id: 'd', name: '49ers D/ST', position: 'DST', team: 'SF' }
-  };
-
-  const { matched, corrected, unmatched } = service.applyTeams(pool);
-  assert.equal(matched, 3);
-  assert.equal(corrected, 1, 'only Deebo was on the wrong team');
-  assert.deepEqual(unmatched, []);
-  assert.equal(pool.a.team, 'SF');
-  assert.equal(pool.b.team, 'WAS', 'WSH normalises onto WAS');
-  assert.equal(pool.c.team, 'MIN', 'resolved through the teamID dictionary');
-  assert.equal(pool.d.team, 'SF', 'a team defense is its own franchise');
+  const byName = new Map(pool.map((player) => [player.name, player]));
+  assert.equal(byName.get('Deebo Samuel').team, 'SF');
+  assert.equal(byName.get('Terry McLaurin').team, 'WAS', 'WSH normalises onto WAS');
+  assert.equal(byName.get('Vikings D/ST').position, 'DST', 'DEF normalises onto DST');
+  assert.equal(byName.has('Bench Guy'), false, 'a row with no projection cannot drive VOR');
 });
 
-test('playerKey folds suffixes and punctuation so both spellings join', () => {
-  assert.equal(playerKey('Deebo Samuel Sr.'), playerKey('Deebo Samuel'));
-  assert.equal(playerKey("Ja'Marr Chase"), 'jamarr chase');
-  assert.equal(playerKey('Brian Robinson Jr.'), 'brian robinson');
-  assert.equal(playerKey('Amon-Ra St. Brown'), 'amonra st brown');
+test('playerKey folds punctuation so both spellings join', () => {
+  assert.equal(playerKey("Ja'Marr Chase"), playerKey('JaMarr Chase'));
+  assert.equal(playerKey('Amon-Ra St. Brown'), playerKey('AmonRa St Brown'));
+  assert.equal(playerKey('Brian Robinson Jr.'), 'brianrobinsonjr');
 });
 
 /* ------------------------------------------------------------- hydration -- */

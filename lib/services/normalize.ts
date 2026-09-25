@@ -61,24 +61,37 @@ export function fantasyPosition(value: unknown): FantasyPosition | null {
 }
 
 /**
- * Feeds disagree about a handful of team codes. Tank01 sends WSH for
- * Washington and JAC for Jacksonville; other hosts still carry relocated
- * franchises (OAK, SD, STL) or three-letter variants (KAN, NWE, SFO). Storing
- * them verbatim means the UI's team table misses the row, and a projection's
- * `team` no longer joins to its game in fsnv2.nfl_matchups — which is exactly
- * how a player ends up with someone else's opponent.
+ * Franchise abbreviations, canonicalised to the set the app renders with
+ * (js/nflTeams.js — the same 32 keys the logo chip, the team colours and the
+ * synthetic NFL slate are keyed on).
  *
- * Mirrored by TEAM_ALIASES in js/nflTeams.js — keep the two in step.
+ * Vendors disagree on a handful of them — Tank01 sends Washington as `WSH`,
+ * other feeds send `JAC` for Jacksonville or still carry a relocated team's old
+ * city — and an abbreviation the UI does not know renders as a grey chip with
+ * no logo and no opponent. Relocations collapse onto the current franchise:
+ * `OAK`/`SD`/`STL` are the same clubs as `LV`/`LAC`/`LAR`.
  */
 const TEAM_ALIASES: Record<string, string> = {
-  WSH: 'WAS', WFT: 'WAS', WSN: 'WAS',
+  ARZ: 'ARI',
+  BLT: 'BAL',
+  CLV: 'CLE',
+  GNB: 'GB',
+  HST: 'HOU',
   JAC: 'JAX',
-  LA: 'LAR', STL: 'LAR', RAM: 'LAR',
-  SD: 'LAC', SDG: 'LAC',
-  OAK: 'LV', RAI: 'LV', LVR: 'LV',
-  ARZ: 'ARI', BLT: 'BAL', CLV: 'CLE', HST: 'HOU',
-  TAM: 'TB', KAN: 'KC', NOR: 'NO', NWE: 'NE', SFO: 'SF', GNB: 'GB',
-  NOS: 'NO', TBB: 'TB'
+  JAG: 'JAX',
+  KAN: 'KC',
+  LA: 'LAR',
+  LVR: 'LV',
+  NOR: 'NO',
+  NWE: 'NE',
+  OAK: 'LV',
+  SD: 'LAC',
+  SDG: 'LAC',
+  SFO: 'SF',
+  STL: 'LAR',
+  TAM: 'TB',
+  WFT: 'WAS',
+  WSH: 'WAS'
 };
 
 /** The 32 franchise codes everything downstream is keyed by. */
@@ -91,12 +104,19 @@ export const NFL_TEAM_ABBRS = new Set([
 /** Team abbreviations are compared and stored uppercase; free agents are 'FA'. */
 export function teamAbbr(value: unknown, fallback = 'FA'): string {
   const raw = text(value);
-  if (!raw) return fallback;
+  if (!raw) return TEAM_ALIASES[fallback.toUpperCase()] ?? fallback;
   const upper = raw.toUpperCase();
   return TEAM_ALIASES[upper] ?? upper;
 }
 
-/** The same, but null for anything that is not one of the 32 franchises. */
+/**
+ * The same, but null for anything that is not one of the 32 franchises.
+ *
+ * Used wherever a value has to be a *team* and not merely a string: a game's
+ * two sides, a projection's `team`, a roster entry's affiliation. Writing an
+ * unrecognised code through means the row no longer joins to its game in
+ * fsnv2.nfl_matchups, and the player renders someone else's opponent.
+ */
 export function knownTeamAbbr(value: unknown): string | null {
   const abbr = teamAbbr(value, '');
   return NFL_TEAM_ABBRS.has(abbr) ? abbr : null;

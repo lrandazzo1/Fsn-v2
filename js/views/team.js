@@ -10,6 +10,7 @@
 
 import { annotatePlayers, playerOpponentLabel } from '../nflTeams.js';
 import { ROSTER_SLOTS } from '../types.js';
+import { teamLogoHtml } from '../nflTeams.js';
 import {
   badge,
   escapeHtml,
@@ -46,13 +47,6 @@ export function createTeamView({ engine, season, ui, router }) {
     render();
   });
 
-  /** Re-stamps every player's matchup for the week now on screen. */
-  function stampWeek(week) {
-    if (ui.nflWeek === week) return;
-    ui.nflWeek = week;
-    annotatePlayers(engine.playersById, week);
-  }
-
   function enter(params = {}) {
     const requested = Number(params.id);
     teamId = Number.isFinite(requested) && engine.teamById(requested) ? requested : engine.userTeamId;
@@ -62,7 +56,10 @@ export function createTeamView({ engine, season, ui, router }) {
   function render() {
     const team = engine.teamById(teamId);
     const week = ui.week || 1;
-    stampWeek(week);
+    if (ui.nflWeek !== week) {
+      ui.nflWeek = week;
+      annotatePlayers(engine.playersById, week);
+    }
     const record = season.recordFor(teamId);
     const rank = record?.rank ?? '—';
 
@@ -83,8 +80,8 @@ export function createTeamView({ engine, season, ui, router }) {
     ].join('');
 
     el.starterChip.textContent = `${filled}/${starterCount} filled`;
-    renderSlots(el.starters, engine, teamId, 'starters');
-    renderSlots(el.bench, engine, teamId, 'bench');
+    renderSlots(el.starters, engine, teamId, 'starters', week);
+    renderSlots(el.bench, engine, teamId, 'bench', week);
 
     renderMatchup(team, week);
 
@@ -156,13 +153,17 @@ export function createTeamView({ engine, season, ui, router }) {
             return `
               <div class="matchup__row">
                 <span class="matchup__player ${minePts >= themPts ? 'is-win' : ''}">
-                  ${me ? `${escapeHtml(me.name)} <small>${escapeHtml(playerOpponentLabel(me, week))}</small>` : '<em>empty</em>'}
+                  ${me
+                    ? `${teamLogoHtml(me.team)}${escapeHtml(me.name)} <small>${escapeHtml(playerOpponentLabel(me, week))}</small>`
+                    : '<em>empty</em>'}
                   <b>${me ? minePts.toFixed(1) : '—'}</b>
                 </span>
                 <span class="matchup__slot">${badge(slot.label === 'FLEX' ? 'FLEX' : slot.label, true)}</span>
                 <span class="matchup__player is-right ${themPts > minePts ? 'is-win' : ''}">
                   <b>${them ? themPts.toFixed(1) : '—'}</b>
-                  ${them ? `${escapeHtml(them.name)} <small>${escapeHtml(playerOpponentLabel(them, week))}</small>` : '<em>empty</em>'}
+                  ${them
+                    ? `<small>${escapeHtml(playerOpponentLabel(them, week))}</small> ${escapeHtml(them.name)}${teamLogoHtml(them.team)}`
+                    : '<em>empty</em>'}
                 </span>
               </div>`;
           })
@@ -179,9 +180,9 @@ export function createTeamView({ engine, season, ui, router }) {
   /** Actual points once the week is final, the weekly projection until then. */
   function slotPoints(week, player, final) {
     if (!player) return 0;
-    if (!final) return season.weeklyProjection(player);
+    if (!final) return season.weeklyProjection(player, week);
     const scored = season.scoreFor(week, player.id);
-    return scored === null ? season.weeklyProjection(player) : scored;
+    return scored === null ? season.weeklyProjection(player, week) : scored;
   }
 
   function playerIn(id, slotKey) {

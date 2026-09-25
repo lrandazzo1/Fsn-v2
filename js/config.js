@@ -13,6 +13,11 @@
 const runtime = (typeof window !== 'undefined' && window.FSN_CONFIG) || {};
 const env = (typeof process !== 'undefined' && process.env) || {};
 
+/** January and February still belong to the season that kicked off last autumn. */
+function currentNflSeason(now = new Date()) {
+  return now.getMonth() < 2 ? now.getFullYear() - 1 : now.getFullYear();
+}
+
 export const CONFIG = {
   supabase: {
     url: runtime.supabase?.url || env.SUPABASE_URL || 'https://opfrwtjqjciqpmajeqlr.supabase.co',
@@ -40,16 +45,22 @@ export const CONFIG = {
   },
 
   /**
-   * The real NFL season the synced Tank01 data is read for. Both are derived
-   * from today's date by js/nflData.js (the same arithmetic as
-   * lib/services/env.ts) and only need setting to pin the UI to a past week —
-   * `window.FSN_CONFIG = { nfl: { season: 2026, week: 1 } }`.
+   * Which slice of the synced sports data the UI reads. Mirrors the defaults in
+   * lib/services/env.ts so the browser and the sync service agree without being
+   * configured twice: a September-to-February date belongs to the season that
+   * started in the earlier calendar year.
    */
-  nfl: {
-    season: runtime.nfl?.season || env.SPORTS_DATA_SEASON || null,
-    week: runtime.nfl?.week || env.SPORTS_DATA_WEEK || null,
-    /** Set false to skip the live reads entirely and run on the seed pool. */
-    enabled: runtime.nfl?.enabled ?? true
+  sportsData: {
+    season: runtime.sportsData?.season || Number(env.SPORTS_DATA_SEASON) || currentNflSeason(),
+    seasonType: runtime.sportsData?.seasonType || env.SPORTS_DATA_SEASON_TYPE || 'reg',
+    /** Match the league's scoring so the projections on screen are the right ones. */
+    scoringFormat:
+      runtime.sportsData?.scoringFormat ||
+      env.SPORTS_DATA_SCORING ||
+      runtime.league?.scoringType ||
+      'ppr',
+    /** Set false to ignore the synced data and run purely on playerData.js. */
+    enabled: runtime.sportsData?.enabled ?? true
   },
 
   storageKeys: {

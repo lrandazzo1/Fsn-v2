@@ -201,30 +201,26 @@ function fantasyPosition(value) {
   return POSITION_ALIASES[raw.toUpperCase()] ?? null;
 }
 var TEAM_ALIASES = {
-  WSH: "WAS",
-  WFT: "WAS",
-  WSN: "WAS",
-  JAC: "JAX",
-  LA: "LAR",
-  STL: "LAR",
-  RAM: "LAR",
-  SD: "LAC",
-  SDG: "LAC",
-  OAK: "LV",
-  RAI: "LV",
-  LVR: "LV",
   ARZ: "ARI",
   BLT: "BAL",
   CLV: "CLE",
+  GNB: "GB",
   HST: "HOU",
-  TAM: "TB",
+  JAC: "JAX",
+  JAG: "JAX",
   KAN: "KC",
+  LA: "LAR",
+  LVR: "LV",
   NOR: "NO",
   NWE: "NE",
+  OAK: "LV",
+  SD: "LAC",
+  SDG: "LAC",
   SFO: "SF",
-  GNB: "GB",
-  NOS: "NO",
-  TBB: "TB"
+  STL: "LAR",
+  TAM: "TB",
+  WFT: "WAS",
+  WSH: "WAS"
 };
 var NFL_TEAM_ABBRS = /* @__PURE__ */ new Set([
   "ARI",
@@ -262,7 +258,7 @@ var NFL_TEAM_ABBRS = /* @__PURE__ */ new Set([
 ]);
 function teamAbbr(value, fallback = "FA") {
   const raw = text(value);
-  if (!raw) return fallback;
+  if (!raw) return TEAM_ALIASES[fallback.toUpperCase()] ?? fallback;
   const upper = raw.toUpperCase();
   return TEAM_ALIASES[upper] ?? upper;
 }
@@ -679,14 +675,6 @@ function createTank01Provider(options) {
     teamIndex = index;
     return index;
   }
-  function resolveTeam(row, index, fallbackAbbr = null, fallbackId = null) {
-    const direct = knownTeamAbbr(row.teamAbv) ?? knownTeamAbbr(row.team);
-    if (direct) return direct;
-    const id = text(row.teamID) ?? fallbackId;
-    const mapped = id ? index.get(id) ?? null : null;
-    if (mapped) return mapped;
-    return knownTeamAbbr(fallbackAbbr);
-  }
   function describe() {
     return {
       name,
@@ -730,10 +718,16 @@ function createTank01Provider(options) {
       external_id: externalId,
       name: name2,
       position,
-      // 'FA' only when neither the row, the dictionary nor the roster it came
-      // from names a franchise — never because a code was spelled differently.
-      team: resolveTeam(row, index, fallbackTeam, fallbackTeamId) ?? "FA",
-      nfl_team_external_id: text(row.teamID) ?? fallbackTeamId,
+      // The roster this entry was read from is the affiliation, not the `team`
+      // field on the entry: a traded player keeps showing his old club there
+      // until the vendor rewrites the player record, while the roster he
+      // appears on flips the moment the trade lands. Only the flat player-list
+      // fallback (no enclosing roster) falls back to the entry's own fields —
+      // and there `teamAbv` comes before `team`, with `teamID` through the
+      // /getNFLTeams dictionary behind both, because a flat row often carries
+      // nothing but the numeric id.
+      team: knownTeamAbbr(fallbackTeam) ?? knownTeamAbbr(row.teamAbv) ?? knownTeamAbbr(row.team) ?? index.get(text(fallbackTeamId) ?? text(row.teamID) ?? "") ?? "FA",
+      nfl_team_external_id: fallbackTeamId ?? text(row.teamID),
       jersey: text(row.jerseyNum),
       status: text(injury.designation) ?? text(row.status) ?? "Active",
       injury,
@@ -818,12 +812,11 @@ function createTank01Provider(options) {
         player_id: `${name}-${externalId}`,
         name: text(entry.longName) ?? text(entry.espnName),
         position: text(entry.pos) ?? text(entry.position),
-        team: resolveTeam(entry, index),
+        // fsnv2_sync_projections only finds the game when this is one of the 32
+        // codes the schedule uses, so it is resolved rather than written through.
+        team: knownTeamAbbr(entry.teamAbv) ?? knownTeamAbbr(entry.team) ?? index.get(text(entry.teamID) ?? "") ?? null,
         // The live projections feed carries no opponent; fsnv2_sync_projections
-        // derives it from fsnv2.nfl_matchups on the way in (migration 0005) —
-        // which only joins when `team` above is a franchise code the schedule
-        // also uses, hence resolving it through the dictionary rather than
-        // writing the payload's spelling straight through.
+        // derives it from fsnv2.nfl_matchups on the way in (migration 0005).
         opponent: knownTeamAbbr(entry.opponent),
         fantasy_points: fantasyPointsOf(entry, context.scoringFormat),
         stats,
@@ -912,7 +905,7 @@ function createTank01Provider(options) {
   function mapBoxScorePlayer(entry, context, week, gameId, teams, index) {
     const externalId = text(entry.playerID) ?? text(entry.__key);
     if (!externalId) return null;
-    const team = resolveTeam(entry, index);
+    const team = knownTeamAbbr(entry.teamAbv) ?? knownTeamAbbr(entry.team) ?? index.get(text(entry.teamID) ?? "") ?? null;
     const home = knownTeamAbbr(teams.home);
     const away = knownTeamAbbr(teams.away);
     const opponent = team && home && away ? team === home ? away : home : null;
@@ -961,7 +954,8 @@ function createTank01Provider(options) {
         rows.push(row);
       }
       for (const entry of asRecords(envelope.DST)) {
-        const keyed = /^home$/i.test(text(entry.__key) ?? "") ? game.home_team : /^away$/i.test(text(entry.__key) ?? "") ? game.away_team : null;
+        const key = text(entry.__key) ?? "";
+        const keyed = /^home$/i.test(key) ? game.home_team : /^away$/i.test(key) ? game.away_team : null;
         const abbr = defenseTeamAbbr(entry, index) ?? knownTeamAbbr(keyed);
         if (!abbr) continue;
         const externalId = `DST-${abbr}`;

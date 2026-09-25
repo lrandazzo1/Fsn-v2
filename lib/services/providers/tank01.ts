@@ -28,8 +28,8 @@ import {
   flattenStats,
   gameStatus,
   kickoffIso,
-  knownTeamAbbr,
   num,
+  knownTeamAbbr,
   optionalNum,
   text
 } from '../normalize.ts';
@@ -217,7 +217,7 @@ function defenseTeamAbbr(
   const explicit = knownTeamAbbr(entry.teamAbv) ?? knownTeamAbbr(entry.team);
   if (explicit) return explicit;
 
-  // teamID, or a numeric key, through the /getNFLTeams dictionary.
+  // `teamID`, or a numeric key, through the /getNFLTeams dictionary.
   const id = text(entry.teamID) ?? text(entry.__key);
   if (id && index) {
     const mapped = index.get(id);
@@ -313,13 +313,15 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
   }
 
   /**
-   * Tank01's `teamID` -> `teamAbv` dictionary, from `/getNFLTeams`.
+   * Tank01's `teamID` -> `teamAbv` dictionary, from `/getNFLTeams`, built once
+   * and reused.
    *
-   * Every payload that carries a team carries at least one of `teamAbv`,
-   * `team` or `teamID`, and the numeric id is the only one some of them have
-   * (the projections feed's `teamDefenseProjections` node is keyed by it). A
-   * single cached call resolves all three to one franchise code instead of
-   * different payloads producing different spellings of the same team.
+   * Every payload that carries a team carries at least one of `teamAbv`, `team`
+   * or `teamID`, and the numeric id is the only one some of them have — the
+   * projections feed's `teamDefenseProjections` node is keyed by it, and a flat
+   * player-list row often has nothing else. Resolving all three through one
+   * dictionary is what stops two payloads describing the same franchise under
+   * two different codes.
    */
   let teamIndex: Map<string, string> | null = null;
 
@@ -345,28 +347,6 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
     }
     teamIndex = index;
     return index;
-  }
-
-  /**
-   * A row's franchise, in the order Tank01 is reliable: the `teamAbv` string,
-   * then `team`, then `teamID` through the dictionary above, then whatever the
-   * caller knows (the roster the row appeared on). Unknown codes resolve to null
-   * rather than being written through, so a typo can never masquerade as a team.
-   */
-  function resolveTeam(
-    row: Record<string, unknown>,
-    index: Map<string, string>,
-    fallbackAbbr: string | null = null,
-    fallbackId: string | null = null
-  ): string | null {
-    const direct = knownTeamAbbr(row.teamAbv) ?? knownTeamAbbr(row.team);
-    if (direct) return direct;
-
-    const id = text(row.teamID) ?? fallbackId;
-    const mapped = id ? index.get(id) ?? null : null;
-    if (mapped) return mapped;
-
-    return knownTeamAbbr(fallbackAbbr);
   }
 
   function describe(): ProviderDescription {
@@ -432,10 +412,21 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
       external_id: externalId,
       name,
       position,
-      // 'FA' only when neither the row, the dictionary nor the roster it came
-      // from names a franchise — never because a code was spelled differently.
-      team: resolveTeam(row, index, fallbackTeam, fallbackTeamId) ?? 'FA',
-      nfl_team_external_id: text(row.teamID) ?? fallbackTeamId,
+      // The roster this entry was read from is the affiliation, not the `team`
+      // field on the entry: a traded player keeps showing his old club there
+      // until the vendor rewrites the player record, while the roster he
+      // appears on flips the moment the trade lands. Only the flat player-list
+      // fallback (no enclosing roster) falls back to the entry's own fields —
+      // and there `teamAbv` comes before `team`, with `teamID` through the
+      // /getNFLTeams dictionary behind both, because a flat row often carries
+      // nothing but the numeric id.
+      team:
+        knownTeamAbbr(fallbackTeam) ??
+        knownTeamAbbr(row.teamAbv) ??
+        knownTeamAbbr(row.team) ??
+        index.get(text(fallbackTeamId) ?? text(row.teamID) ?? '') ??
+        'FA',
+      nfl_team_external_id: fallbackTeamId ?? text(row.teamID),
       jersey: text(row.jerseyNum),
       status: text(injury.designation) ?? text(row.status) ?? 'Active',
       injury,
@@ -467,7 +458,8 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
     const players: PlayerRow[] = [];
     const seen = new Set<string>();
 
-    // This payload is the dictionary too, so the roster pass needs no extra call.
+    // This payload is the teamID dictionary too, so the roster pass below — and
+    // every later call in this run — needs no extra request.
     const index = new Map<string, string>();
     for (const team of teams) {
       const abbr = knownTeamAbbr(team.teamAbv);
@@ -539,12 +531,15 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
         player_id: `${name}-${externalId}`,
         name: text(entry.longName) ?? text(entry.espnName),
         position: text(entry.pos) ?? text(entry.position),
-        team: resolveTeam(entry, index),
+        // fsnv2_sync_projections only finds the game when this is one of the 32
+        // codes the schedule uses, so it is resolved rather than written through.
+        team:
+          knownTeamAbbr(entry.teamAbv) ??
+          knownTeamAbbr(entry.team) ??
+          index.get(text(entry.teamID) ?? '') ??
+          null,
         // The live projections feed carries no opponent; fsnv2_sync_projections
-        // derives it from fsnv2.nfl_matchups on the way in (migration 0005) —
-        // which only joins when `team` above is a franchise code the schedule
-        // also uses, hence resolving it through the dictionary rather than
-        // writing the payload's spelling straight through.
+        // derives it from fsnv2.nfl_matchups on the way in (migration 0005).
         opponent: knownTeamAbbr(entry.opponent),
         fantasy_points: fantasyPointsOf(entry, context.scoringFormat),
         stats,
@@ -587,9 +582,9 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
     if (!externalId) return null;
 
     const fromId = teamsFromGameId(externalId);
-    // `teamIDHome` / `teamIDAway` are the last resort: '20260913_CHI@MIN' names
-    // both sides, and a game whose teams cannot be resolved is dropped rather
-    // than stored under a code nothing else uses.
+    // '20260913_CHI@MIN' names both sides, and `teamIDHome`/`teamIDAway` are the
+    // last resort. A game whose sides cannot be resolved to franchises is
+    // dropped rather than stored under a code nothing else joins to.
     const index = teamIndex ?? new Map<string, string>();
     const home =
       knownTeamAbbr(row.home ?? row.homeTeam) ??
@@ -675,10 +670,13 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
     const externalId = text(entry.playerID) ?? text(entry.__key);
     if (!externalId) return null;
 
-    // Both sides of the game are already normalised by mapGame(), so this is
-    // the same comparison the UI makes: the player's franchise against the
-    // game's home side decides which team is the opponent.
-    const team = resolveTeam(entry, index);
+    // Both sides of the game are already canonical (mapGame drops anything
+    // else), so this is the same comparison the UI makes.
+    const team =
+      knownTeamAbbr(entry.teamAbv) ??
+      knownTeamAbbr(entry.team) ??
+      index.get(text(entry.teamID) ?? '') ??
+      null;
     const home = knownTeamAbbr(teams.home);
     const away = knownTeamAbbr(teams.away);
     const opponent = team && home && away ? (team === home ? away : home) : null;
@@ -746,10 +744,11 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
       // The box score's DST node is keyed 'home'/'away' and carries only raw
       // defensive stats, so the fantasy total is computed here.
       for (const entry of asRecords(envelope.DST)) {
-        // The DST node is keyed 'home'/'away', so the game itself names the team.
-        const keyed = /^home$/i.test(text(entry.__key) ?? '')
+        // This node is keyed 'home'/'away', so the game itself names the team.
+        const key = text(entry.__key) ?? '';
+        const keyed = /^home$/i.test(key)
           ? game.home_team
-          : /^away$/i.test(text(entry.__key) ?? '')
+          : /^away$/i.test(key)
             ? game.away_team
             : null;
         const abbr = defenseTeamAbbr(entry, index) ?? knownTeamAbbr(keyed);

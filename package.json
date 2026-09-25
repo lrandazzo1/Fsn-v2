@@ -15,13 +15,15 @@
     "test:season": "node tests/season.test.mjs",
     "sync:data": "node scripts/sync-data.ts",
     "test:sync-data": "node scripts/test-sync-data.ts",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "verify": "npm run typecheck && npm run build:api && npm test && npm run test:sync-data"
   },
   "engines": {
     "node": ">=22.6"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",
-    "esbuild": "^0.28.2"
+    "esbuild": "^0.28.2",
+    "typescript": "^6.0.3"
   }
 }

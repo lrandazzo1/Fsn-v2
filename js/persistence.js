@@ -5,12 +5,19 @@
  * `public.fsnv2_record_pick` RPC, which re-derives the snake order server-side
  * and rejects anything out of sequence.
  *
+ * It is also the read side of the sports-data sync: `liveBundle()` pulls the
+ * synced player pool, the week's provider projections and the real NFL slate
+ * through the four read RPCs, which are granted to `anon` so the publishable
+ * key is enough.
+ *
  * Design notes
  *  - Plain `fetch` against PostgREST rather than the supabase-js bundle, so the
  *    exact same module runs in the browser and in the Node test-suite.
  *  - Writes are queued and retried; the UI never blocks on the network.
  *  - A localStorage mirror is always kept, so a refresh restores the room even
  *    when Supabase is unreachable or disabled.
+ *  - Reads resolve to null instead of throwing, so every caller has a working
+ *    offline path.
  */
 
 import { CONFIG } from './config.js';
@@ -119,11 +126,11 @@ export class DraftRepository {
   /**
    * Pushes the local projection pool into `fsnv2.players` in batches.
    *
-   * These rows are the seed pool (`p-0000`…, provider null) and sit *beside*
-   * the provider-synced rows (`tank01-<id>`), never over them — the unique
-   * constraint is on (provider, external_id). Call it after
-   * `NflDataService.applyTeams()` so the teams written up are the provider's
-   * own, not the stale codes from js/playerData.js.
+   * The `team` on these rows is only ever a starting point: since migration
+   * 0006, fsnv2_upsert_players() prefers the team the sports-data sync
+   * established over the one sent from here, so a stale static row can no
+   * longer move a player back off his real roster. adp and `stats` are the
+   * browser's own numbers and are written as sent.
    */
   async syncPlayers(players, batchSize = 120) {
     const rows = players.map((player) => ({
@@ -188,18 +195,22 @@ export class DraftRepository {
     return this.rpc('fsnv2_players', { p_limit: limit });
   }
 
-  /* ------------------------------------------------- synced provider data -- */
-
-  /** The `/getNFLTeams` dictionary: teamID, teamAbv, logos and bye weeks. */
-  nflTeams() {
-    return this.rpc('fsnv2_nfl_teams', {});
+  /**
+   * One week of provider projections. `scoringFormat` null returns every
+   * format the sync has stored; pass the league's to keep the numbers honest.
+   */
+  projections({ season, week, scoringFormat = null, seasonType = 'reg', limit = 1000 } = {}) {
+    return this.rpc('fsnv2_projections', {
+      p_season: season,
+      p_week: week,
+      p_scoring_format: scoringFormat,
+      p_season_type: seasonType,
+      p_limit: limit
+    });
   }
 
-  /**
-   * The real NFL slate. `week = null` returns the whole season, which is what
-   * the UI wants: every week its selector offers is then a real one.
-   */
-  nflSchedule(season, week = null, seasonType = 'reg') {
+  /** The real NFL slate. `week` null returns every synced week. */
+  nflSchedule({ season, week = null, seasonType = 'reg' } = {}) {
     return this.rpc('fsnv2_nfl_schedule', {
       p_season: season,
       p_week: week,
@@ -207,15 +218,54 @@ export class DraftRepository {
     });
   }
 
-  /** Weekly provider projections for a season/week. */
-  projections(season, week, scoringFormat = null, limit = 1000) {
-    return this.rpc('fsnv2_projections', {
-      p_season: season,
-      p_week: week,
-      p_scoring_format: scoringFormat,
-      p_season_type: 'reg',
-      p_limit: limit
-    });
+  nflTeams() {
+    return this.rpc('fsnv2_nfl_teams', {});
+  }
+
+  /**
+   * Everything the UI needs from the sync, in one shot.
+   *
+   * All four RPCs are granted to `anon`, so the publishable key in config.js is
+   * enough — no service key ever reaches the browser. Resolves to null rather
+   * than throwing when Supabase is off or unreachable: the caller falls back to
+   * the static pool in playerData.js and the app carries on offline.
+   *
+   * Projections are fetched per week because the RPC takes one week at a time;
+   * the weeks actually synced are discovered from the schedule, so a season
+   * with only week 3 in the database costs exactly one projections call.
+   *
+   * @param {{season: number, weeks?: number[], scoringFormat?: string|null, limit?: number}} options
+   * @returns {Promise<{players: Array, projections: Array, schedule: Array}|null>}
+   */
+  async liveBundle({ season, weeks = null, scoringFormat = null, limit = 1000 } = {}) {
+    if (!this.enabled) return null;
+
+    try {
+      const [players, schedule] = await Promise.all([
+        this.players(limit),
+        this.nflSchedule({ season })
+      ]);
+
+      const scheduleRows = Array.isArray(schedule) ? schedule : [];
+      const syncedWeeks = weeks
+        ? weeks
+        : [...new Set(scheduleRows.map((game) => Number(game.week)).filter(Number.isFinite))];
+
+      const projectionPages = await Promise.all(
+        syncedWeeks.map((week) =>
+          this.projections({ season, week, scoringFormat, limit }).catch(() => [])
+        )
+      );
+
+      return {
+        players: Array.isArray(players) ? players : [],
+        schedule: scheduleRows,
+        projections: projectionPages.flatMap((page) => (Array.isArray(page) ? page : []))
+      };
+    } catch (error) {
+      this.setStatus('error', error.message);
+      return null;
+    }
   }
 
   /* ------------------------------------------------------------------- queue */

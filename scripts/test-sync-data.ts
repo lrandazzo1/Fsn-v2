@@ -244,9 +244,67 @@ async function phaseMapping(): Promise<void> {
     }
   });
 
-  await check('team codes resolve from teamAbv, then teamID — never a feed spelling', async () => {
+  await check('a traded player takes the roster he is on, not the team on his record', async () => {
+    // The bug this guards: Tank01 leaves the stale club on a traded player's own
+    // record for a while, so a profile kept showing a former team. The roster he
+    // appears on is the affiliation. `WSH` also has to land as `WAS`, the
+    // abbreviation the app keys its colours, logos and slate on.
+    const payload = {
+      statusCode: 200,
+      body: [
+        {
+          teamID: '21',
+          teamAbv: 'MIN',
+          teamCity: 'Minnesota',
+          teamName: 'Vikings',
+          byeWeeks: { '2026': ['6'] },
+          Roster: {
+            '3917315': {
+              playerID: '3917315',
+              longName: 'Kyler Murray',
+              pos: 'QB',
+              team: 'ARI', // stale on the player record
+              teamID: '22', // stale too
+              jerseyNum: '1'
+            }
+          }
+        },
+        {
+          teamID: '28',
+          teamAbv: 'WSH',
+          teamCity: 'Washington',
+          teamName: 'Commanders',
+          byeWeeks: { '2026': ['9'] },
+          Roster: [
+            { playerID: '4685702', longName: 'Jayden Daniels', pos: 'QB', team: 'WSH', teamID: '28' }
+          ]
+        }
+      ]
+    };
+
+    const provider = resolveProvider({
+      env: fixtureEnv({ provider: 'tank01', baseUrl: 'https://sports-data.test' }),
+      logger: silentLogger,
+      fetch: async () =>
+        new Response(JSON.stringify(payload), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        })
+    });
+
+    const players = await provider.fetchPlayers(fixtureContext());
+    const murray = need(players.find((player) => player.external_id === '3917315'), 'Kyler Murray');
+    assert.equal(murray.team, 'MIN', 'the roster he is on wins over his own record');
+    assert.equal(murray.nfl_team_external_id, '21');
+    assert.equal(murray.bye_week, 6, 'the bye week comes with the new club');
+
+    const daniels = need(players.find((player) => player.external_id === '4685702'), 'Jayden Daniels');
+    assert.equal(daniels.team, 'WAS', 'WSH should canonicalise to WAS');
+  });
+
+  await check('team codes resolve from the roster, then teamAbv, then teamID', async () => {
     // A payload in the spellings the live API actually uses: WSH for
-    // Washington, JAC for Jacksonville, and a roster entry that carries only a
+    // Washington, JAC for Jacksonville, and a roster entry carrying only a
     // numeric teamID. All three have to land on the 32 codes the schedule, the
     // projections and the UI are keyed by, or a player's opponent joins to
     // nothing and the board shows someone else's game.
@@ -258,16 +316,17 @@ async function phaseMapping(): Promise<void> {
     const rosters = [
       {
         ...teams[0],
-        Roster: { '1': { playerID: '1', longName: 'Terry McLaurin', pos: 'WR', team: 'WSH', teamID: '28' } }
+        Roster: { '1': { playerID: '1', longName: 'Terry McLaurin', pos: 'WR', teamID: '28' } }
       },
       {
         ...teams[1],
-        Roster: { '2': { playerID: '2', longName: 'Brian Thomas Jr.', pos: 'WR', teamID: '15' } }
+        Roster: { '2': { playerID: '2', longName: 'Brian Thomas Jr.', pos: 'WR' } }
       },
       {
         ...teams[2],
-        // No team on the row at all: the roster it appears on is the fallback.
-        Roster: { '3': { playerID: '3', longName: 'Deebo Samuel Sr.', pos: 'WR' } }
+        // The entry's own `team` still says his old club; the roster he appears
+        // on is the affiliation, and it wins.
+        Roster: { '3': { playerID: '3', longName: 'Deebo Samuel Sr.', pos: 'WR', team: 'WSH' } }
       }
     ];
 
@@ -307,9 +366,9 @@ async function phaseMapping(): Promise<void> {
 
     const players = await provider.fetchPlayers(fixtureContext());
     const byName = new Map(players.map((player) => [player.name, player.team]));
-    assert.equal(byName.get('Terry McLaurin'), 'WAS', "from the row's own teamAbv");
-    assert.equal(byName.get('Brian Thomas Jr.'), 'JAX', 'from teamID via the dictionary');
-    assert.equal(byName.get('Deebo Samuel Sr.'), 'SF', 'from the roster it appeared on');
+    assert.equal(byName.get('Terry McLaurin'), 'WAS', 'from the roster, spelling folded');
+    assert.equal(byName.get('Brian Thomas Jr.'), 'JAX', 'the roster names the team');
+    assert.equal(byName.get('Deebo Samuel Sr.'), 'SF', 'the roster beats a stale team field');
     assert.equal(
       players.some((player) => player.team === 'FA'),
       false,
