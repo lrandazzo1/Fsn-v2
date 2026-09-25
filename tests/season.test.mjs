@@ -21,7 +21,18 @@ import {
   roundRobinRounds,
   winProbability
 } from '../js/seasonEngine.js';
-import { NFL_ABBRS, nflOpponent, opponentLabel } from '../js/nflTeams.js';
+import {
+  NFL_ABBRS,
+  annotatePlayers,
+  clearNflSchedule,
+  hasNflSchedule,
+  isByeWeek,
+  nflOpponent,
+  normalizeTeamAbbr,
+  opponentLabel,
+  setNflSchedule
+} from '../js/nflTeams.js';
+import { NflDataService, playerKey } from '../js/nflData.js';
 
 /* --------------------------------------------------------------- harness -- */
 
@@ -509,6 +520,18 @@ test('both sides of a game see complementary win probabilities', () => {
 
 console.log('\nNFL opponent context');
 
+/**
+ * A week-1 slate in the two shapes the app is handed: normalised
+ * `fsnv2_nfl_schedule` rows, and raw Tank01 `/getNFLGamesForWeek` entries. SF is
+ * away at WAS, CLE is away at BAL; MIN and CHI have no game, so they are on bye.
+ */
+const WEEK_1 = [
+  { external_id: '20260910_SF@WAS', week: 1, home_team: 'WSH', away_team: 'SF' },
+  { gameID: '20260913_CLE@BAL', gameWeek: 'Week 1', away: 'CLE', home: 'BAL' },
+  { gameID: '20260913_JAC@PIT', gameWeek: 'Week 1' },
+  { external_id: '20260913_SEA@NYJ', week: 1, home_team: 'NYJ', away_team: 'SEA' }
+];
+
 test('all 32 franchises are known and every player team resolves', () => {
   const { engine } = draftedSeason();
   assert.equal(NFL_ABBRS.length, 32);
@@ -517,23 +540,129 @@ test('all 32 franchises are known and every player team resolves', () => {
   });
 });
 
-test('each NFL team has exactly one opponent a week, and it is mutual', () => {
-  for (let week = 1; week <= 14; week += 1) {
-    NFL_ABBRS.forEach((abbr) => {
-      const game = nflOpponent(abbr, week);
-      assert.ok(game, `${abbr} week ${week}`);
-      assert.notEqual(game.opponent, abbr);
-
-      const reverse = nflOpponent(game.opponent, week);
-      assert.equal(reverse.opponent, abbr, 'opponents should agree');
-      assert.equal(reverse.home, !game.home, 'exactly one side is at home');
-    });
-  }
+test('the seed pool has Deebo Samuel on SF, not WAS', () => {
+  const { engine } = draftedSeason();
+  const deebo = Object.values(engine.playersById).find((p) => p.name === 'Deebo Samuel');
+  assert.ok(deebo, 'Deebo Samuel should be in the pool');
+  assert.equal(deebo.team, 'SF');
 });
 
-test('opponentLabel reads "@ TEAM" on the road and "vs TEAM" at home', () => {
-  const game = nflOpponent('BUF', 1);
-  assert.equal(opponentLabel('BUF', 1), `${game.home ? 'vs' : '@'} ${game.opponent}`);
+test('feed spellings fold onto our 32 franchise codes', () => {
+  assert.equal(normalizeTeamAbbr('WSH'), 'WAS');
+  assert.equal(normalizeTeamAbbr('JAC'), 'JAX');
+  assert.equal(normalizeTeamAbbr('OAK'), 'LV');
+  assert.equal(normalizeTeamAbbr('sf'), 'SF');
+  assert.equal(normalizeTeamAbbr('FA'), null);
+  assert.equal(normalizeTeamAbbr(''), null);
+});
+
+test('with no schedule loaded nothing is invented — every label is "—"', () => {
+  clearNflSchedule();
+  assert.equal(hasNflSchedule(1), false);
+  NFL_ABBRS.forEach((abbr) => {
+    assert.equal(nflOpponent(abbr, 1), null);
+    assert.equal(opponentLabel(abbr, 1), '—');
+    assert.equal(isByeWeek(abbr, 1), false, 'an unloaded week is not a bye');
+  });
+});
+
+test('setNflSchedule reads both the fsnv2 and the raw Tank01 game shapes', () => {
+  const { weeks, games } = setNflSchedule(WEEK_1);
+  assert.deepEqual(weeks, [1]);
+  assert.equal(games, 4);
+  // gameID alone: '20260913_JAC@PIT' is JAX away at PIT.
+  assert.deepEqual(nflOpponent('JAX', 1), {
+    opponent: 'PIT',
+    home: false,
+    gameId: '20260913_JAC@PIT',
+    kickoff: null,
+    status: null
+  });
+});
+
+test('opponentLabel reads "@ HOME" on the road and "vs AWAY" at home', () => {
+  setNflSchedule(WEEK_1);
+  assert.equal(opponentLabel('SF', 1), '@ WAS', 'SF is away at Washington');
+  assert.equal(opponentLabel('WAS', 1), 'vs SF');
+  assert.equal(opponentLabel('WSH', 1), 'vs SF', 'the feed spelling resolves too');
+  assert.equal(opponentLabel('BAL', 1), 'vs CLE');
+  assert.equal(opponentLabel('CLE', 1), '@ BAL');
+});
+
+test('both sides of a loaded game agree, and exactly one is at home', () => {
+  setNflSchedule(WEEK_1);
+  ['SF', 'WAS', 'CLE', 'BAL', 'JAX', 'PIT', 'SEA', 'NYJ'].forEach((abbr) => {
+    const game = nflOpponent(abbr, 1);
+    assert.ok(game, `${abbr} should have a week 1 game`);
+    assert.notEqual(game.opponent, abbr);
+    const reverse = nflOpponent(game.opponent, 1);
+    assert.equal(reverse.opponent, abbr, 'opponents should agree');
+    assert.equal(reverse.home, !game.home, 'exactly one side is at home');
+  });
+});
+
+test('a team with no game in a loaded week is on BYE', () => {
+  setNflSchedule(WEEK_1);
+  assert.equal(isByeWeek('MIN', 1), true);
+  assert.equal(opponentLabel('MIN', 1), 'BYE');
+  assert.equal(opponentLabel('CHI', 1), 'BYE');
+  // …but an unloaded week stays '—' rather than claiming 28 byes.
+  assert.equal(hasNflSchedule(2), false);
+  assert.equal(opponentLabel('MIN', 2), '—');
+});
+
+test('annotatePlayers stamps {team, opponent} onto the payload', () => {
+  setNflSchedule(WEEK_1);
+  const players = [
+    { name: 'Deebo Samuel', position: 'WR', team: 'SF' },
+    { name: 'Terry McLaurin', position: 'WR', team: 'WSH' },
+    { name: 'Justin Jefferson', position: 'WR', team: 'MIN' }
+  ];
+  annotatePlayers(players, 1);
+
+  assert.deepEqual(
+    players.map((p) => [p.team, p.opponent, p.isHome, p.onBye]),
+    [
+      ['SF', '@ WAS', false, false],
+      ['WAS', 'vs SF', true, false],
+      ['MIN', 'BYE', null, true]
+    ]
+  );
+});
+
+test('applyTeams overwrites a stale seed team with the provider teamAbv', () => {
+  const service = new NflDataService({ repo: null, season: 2026, week: 1 });
+  service.players = [
+    // Tank01's own spellings: a suffix on the name, WSH for Washington, and a
+    // row that only carries teamID.
+    { name: 'Deebo Samuel Sr.', position: 'WR', team: 'SF', external_id: '4036335' },
+    { name: 'Terry McLaurin', position: 'WR', team: 'WSH', external_id: '3121422' },
+    { name: 'Justin Jefferson', position: 'WR', nfl_team_external_id: '18', external_id: '4262921' }
+  ];
+  service.teamIds = new Map([['18', 'MIN']]);
+
+  const pool = {
+    a: { id: 'a', name: 'Deebo Samuel', position: 'WR', team: 'WAS' },
+    b: { id: 'b', name: 'Terry McLaurin', position: 'WR', team: 'WAS' },
+    c: { id: 'c', name: 'Justin Jefferson', position: 'WR', team: 'MIN' },
+    d: { id: 'd', name: '49ers D/ST', position: 'DST', team: 'SF' }
+  };
+
+  const { matched, corrected, unmatched } = service.applyTeams(pool);
+  assert.equal(matched, 3);
+  assert.equal(corrected, 1, 'only Deebo was on the wrong team');
+  assert.deepEqual(unmatched, []);
+  assert.equal(pool.a.team, 'SF');
+  assert.equal(pool.b.team, 'WAS', 'WSH normalises onto WAS');
+  assert.equal(pool.c.team, 'MIN', 'resolved through the teamID dictionary');
+  assert.equal(pool.d.team, 'SF', 'a team defense is its own franchise');
+});
+
+test('playerKey folds suffixes and punctuation so both spellings join', () => {
+  assert.equal(playerKey('Deebo Samuel Sr.'), playerKey('Deebo Samuel'));
+  assert.equal(playerKey("Ja'Marr Chase"), 'jamarr chase');
+  assert.equal(playerKey('Brian Robinson Jr.'), 'brian robinson');
+  assert.equal(playerKey('Amon-Ra St. Brown'), 'amonra st brown');
 });
 
 /* ------------------------------------------------------------- hydration -- */

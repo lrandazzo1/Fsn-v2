@@ -39,6 +39,19 @@ export const CONFIG = {
     seed: runtime.season?.seed || 20260208
   },
 
+  /**
+   * The real NFL season the synced Tank01 data is read for. Both are derived
+   * from today's date by js/nflData.js (the same arithmetic as
+   * lib/services/env.ts) and only need setting to pin the UI to a past week —
+   * `window.FSN_CONFIG = { nfl: { season: 2026, week: 1 } }`.
+   */
+  nfl: {
+    season: runtime.nfl?.season || env.SPORTS_DATA_SEASON || null,
+    week: runtime.nfl?.week || env.SPORTS_DATA_WEEK || null,
+    /** Set false to skip the live reads entirely and run on the seed pool. */
+    enabled: runtime.nfl?.enabled ?? true
+  },
+
   storageKeys: {
     draft: 'fsnv2.draft.v1',
     ids: 'fsnv2.ids.v1',

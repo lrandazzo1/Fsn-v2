@@ -317,7 +317,9 @@ export function renderSlots(container, engine, teamId, scope = 'all') {
           ? `<span class="roster-slot__player">
                ${badge(player.position, true)}
                <span class="roster-slot__name">${escapeHtml(player.name)}</span>
-               <span class="roster-slot__team">${player.team}</span>
+               <span class="roster-slot__team">${player.team}${
+                 player.opponent && player.opponent !== '—' ? ` · ${player.opponent}` : ''
+               }</span>
              </span>
              <span class="roster-slot__pts">${player.projection}</span>`
           : '<span class="roster-slot__player roster-slot__player--empty">Empty</span><span class="roster-slot__pts">—</span>'

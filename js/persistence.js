@@ -116,7 +116,15 @@ export class DraftRepository {
     return { leagueId: this.leagueId, draftId: this.draftId, state: null, created: true };
   }
 
-  /** Pushes the local projection pool into `fsnv2.players` in batches. */
+  /**
+   * Pushes the local projection pool into `fsnv2.players` in batches.
+   *
+   * These rows are the seed pool (`p-0000`…, provider null) and sit *beside*
+   * the provider-synced rows (`tank01-<id>`), never over them — the unique
+   * constraint is on (provider, external_id). Call it after
+   * `NflDataService.applyTeams()` so the teams written up are the provider's
+   * own, not the stale codes from js/playerData.js.
+   */
   async syncPlayers(players, batchSize = 120) {
     const rows = players.map((player) => ({
       id: player.id,
@@ -178,6 +186,36 @@ export class DraftRepository {
 
   players(limit = 1000) {
     return this.rpc('fsnv2_players', { p_limit: limit });
+  }
+
+  /* ------------------------------------------------- synced provider data -- */
+
+  /** The `/getNFLTeams` dictionary: teamID, teamAbv, logos and bye weeks. */
+  nflTeams() {
+    return this.rpc('fsnv2_nfl_teams', {});
+  }
+
+  /**
+   * The real NFL slate. `week = null` returns the whole season, which is what
+   * the UI wants: every week its selector offers is then a real one.
+   */
+  nflSchedule(season, week = null, seasonType = 'reg') {
+    return this.rpc('fsnv2_nfl_schedule', {
+      p_season: season,
+      p_week: week,
+      p_season_type: seasonType
+    });
+  }
+
+  /** Weekly provider projections for a season/week. */
+  projections(season, week, scoringFormat = null, limit = 1000) {
+    return this.rpc('fsnv2_projections', {
+      p_season: season,
+      p_week: week,
+      p_scoring_format: scoringFormat,
+      p_season_type: 'reg',
+      p_limit: limit
+    });
   }
 
   /* ------------------------------------------------------------------- queue */

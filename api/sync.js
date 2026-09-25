@@ -200,10 +200,75 @@ function fantasyPosition(value) {
   if (!raw) return null;
   return POSITION_ALIASES[raw.toUpperCase()] ?? null;
 }
+var TEAM_ALIASES = {
+  WSH: "WAS",
+  WFT: "WAS",
+  WSN: "WAS",
+  JAC: "JAX",
+  LA: "LAR",
+  STL: "LAR",
+  RAM: "LAR",
+  SD: "LAC",
+  SDG: "LAC",
+  OAK: "LV",
+  RAI: "LV",
+  LVR: "LV",
+  ARZ: "ARI",
+  BLT: "BAL",
+  CLV: "CLE",
+  HST: "HOU",
+  TAM: "TB",
+  KAN: "KC",
+  NOR: "NO",
+  NWE: "NE",
+  SFO: "SF",
+  GNB: "GB",
+  NOS: "NO",
+  TBB: "TB"
+};
+var NFL_TEAM_ABBRS = /* @__PURE__ */ new Set([
+  "ARI",
+  "ATL",
+  "BAL",
+  "BUF",
+  "CAR",
+  "CHI",
+  "CIN",
+  "CLE",
+  "DAL",
+  "DEN",
+  "DET",
+  "GB",
+  "HOU",
+  "IND",
+  "JAX",
+  "KC",
+  "LAC",
+  "LAR",
+  "LV",
+  "MIA",
+  "MIN",
+  "NE",
+  "NO",
+  "NYG",
+  "NYJ",
+  "PHI",
+  "PIT",
+  "SEA",
+  "SF",
+  "TB",
+  "TEN",
+  "WAS"
+]);
 function teamAbbr(value, fallback = "FA") {
   const raw = text(value);
   if (!raw) return fallback;
-  return raw.toUpperCase();
+  const upper = raw.toUpperCase();
+  return TEAM_ALIASES[upper] ?? upper;
+}
+function knownTeamAbbr(value) {
+  const abbr = teamAbbr(value, "");
+  return NFL_TEAM_ABBRS.has(abbr) ? abbr : null;
 }
 var GAME_STATUS_ALIASES = [
   [/^(completed|final|closed|f\/ot)/i, "final"],
@@ -519,11 +584,16 @@ function defenseFantasyPoints(entry) {
   const total = firstNum(entry, ["sacks", "defSack"]) * DST_WEIGHTS.sack + firstNum(entry, ["defensiveInterceptions", "interceptions", "defInt"]) * DST_WEIGHTS.interception + firstNum(entry, ["fumblesRecovered", "fumbleRecoveries", "defFumblesRecovered"]) * DST_WEIGHTS.fumbleRecovery + (firstNum(entry, ["defTD"]) + firstNum(entry, ["returnTD"])) * DST_WEIGHTS.touchdown + firstNum(entry, ["safeties", "defSafety"]) * DST_WEIGHTS.safety + firstNum(entry, ["blockKick", "blockedKick"]) * DST_WEIGHTS.blockedKick + pointsAllowedBonus(firstNum(entry, ["ptsAllowed", "ptsAgainst"]));
   return Math.round(total * 100) / 100;
 }
-function defenseTeamAbbr(entry) {
-  const explicit = text(entry.teamAbv) ?? text(entry.team);
-  if (explicit && !/^\d+$/.test(explicit)) return teamAbbr(explicit, explicit);
+function defenseTeamAbbr(entry, index) {
+  const explicit = knownTeamAbbr(entry.teamAbv) ?? knownTeamAbbr(entry.team);
+  if (explicit) return explicit;
+  const id = text(entry.teamID) ?? text(entry.__key);
+  if (id && index) {
+    const mapped = index.get(id);
+    if (mapped) return mapped;
+  }
   const key = text(entry.__key);
-  if (key && !/^\d+$/.test(key) && !/^(home|away)$/i.test(key)) return teamAbbr(key, key);
+  if (key && !/^(home|away)$/i.test(key)) return knownTeamAbbr(key);
   return null;
 }
 function unwrap(payload) {
@@ -585,6 +655,38 @@ function createTank01Provider(options) {
     const response = await http.getJson(path, query);
     return unwrap(response.json);
   }
+  let teamIndex = null;
+  async function teamAbbrById() {
+    if (teamIndex) return teamIndex;
+    const index = /* @__PURE__ */ new Map();
+    try {
+      const body = await get("teams", {
+        rosters: "false",
+        schedules: "false",
+        topPerformers: "false",
+        teamStats: "false"
+      });
+      for (const row of asRecords(body)) {
+        const abbr = knownTeamAbbr(row.teamAbv ?? row.abbreviation ?? row.__key);
+        const id = text(row.teamID) ?? text(row.__key);
+        if (abbr && id) index.set(id, abbr);
+      }
+    } catch (error) {
+      logger.warn("could not build the teamID dictionary", {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+    teamIndex = index;
+    return index;
+  }
+  function resolveTeam(row, index, fallbackAbbr = null, fallbackId = null) {
+    const direct = knownTeamAbbr(row.teamAbv) ?? knownTeamAbbr(row.team);
+    if (direct) return direct;
+    const id = text(row.teamID) ?? fallbackId;
+    const mapped = id ? index.get(id) ?? null : null;
+    if (mapped) return mapped;
+    return knownTeamAbbr(fallbackAbbr);
+  }
   function describe() {
     return {
       name,
@@ -603,11 +705,11 @@ function createTank01Provider(options) {
     });
     return asRecords(body).map((row) => {
       const externalId = text(row.teamID) ?? text(row.__key);
-      const abbr = text(row.teamAbv) ?? text(row.abbreviation);
+      const abbr = knownTeamAbbr(row.teamAbv ?? row.abbreviation);
       if (!externalId || !abbr) return null;
       return {
         external_id: externalId,
-        abbr: teamAbbr(abbr, abbr),
+        abbr,
         city: text(row.teamCity),
         name: text(row.teamName),
         conference: text(row.conference) ?? text(row.conferenceAbv),
@@ -618,7 +720,7 @@ function createTank01Provider(options) {
       };
     }).filter((row) => row !== null);
   }
-  function mapRosterPlayer(row, fallbackTeam, fallbackTeamId, bye) {
+  function mapRosterPlayer(row, index, fallbackTeam, fallbackTeamId, bye) {
     const externalId = text(row.playerID) ?? text(row.__key);
     const name2 = text(row.longName) ?? text(row.espnName) ?? text(row.cbsShortName);
     const position = fantasyPosition(row.pos ?? row.position);
@@ -628,7 +730,9 @@ function createTank01Provider(options) {
       external_id: externalId,
       name: name2,
       position,
-      team: teamAbbr(row.team ?? fallbackTeam),
+      // 'FA' only when neither the row, the dictionary nor the roster it came
+      // from names a franchise — never because a code was spelled differently.
+      team: resolveTeam(row, index, fallbackTeam, fallbackTeamId) ?? "FA",
       nfl_team_external_id: text(row.teamID) ?? fallbackTeamId,
       jersey: text(row.jerseyNum),
       status: text(injury.designation) ?? text(row.status) ?? "Active",
@@ -652,13 +756,20 @@ function createTank01Provider(options) {
     const teams = asRecords(body);
     const players = [];
     const seen = /* @__PURE__ */ new Set();
+    const index = /* @__PURE__ */ new Map();
     for (const team of teams) {
-      const abbr = text(team.teamAbv);
+      const abbr = knownTeamAbbr(team.teamAbv);
+      const id = text(team.teamID);
+      if (abbr && id) index.set(id, abbr);
+    }
+    if (index.size > 0) teamIndex = index;
+    for (const team of teams) {
+      const abbr = knownTeamAbbr(team.teamAbv);
       const teamId = text(team.teamID);
       const bye = byeWeek(team.byeWeeks, context.season);
       const roster = team.Roster ?? team.roster;
       for (const entry of asRecords(roster)) {
-        const player = mapRosterPlayer(entry, abbr, teamId, bye);
+        const player = mapRosterPlayer(entry, index, abbr, teamId, bye);
         if (!player || seen.has(player.external_id)) continue;
         seen.add(player.external_id);
         players.push(player);
@@ -670,8 +781,9 @@ function createTank01Provider(options) {
     }
     logger.warn("no rosters in teams payload \u2014 falling back to the flat player list");
     const list = await get("playerList");
+    const lookup = index.size > 0 ? index : await teamAbbrById();
     for (const entry of asRecords(list)) {
-      const player = mapRosterPlayer(entry, null, null, null);
+      const player = mapRosterPlayer(entry, lookup, null, null, null);
       if (!player || seen.has(player.external_id)) continue;
       seen.add(player.external_id);
       players.push(player);
@@ -688,6 +800,7 @@ function createTank01Provider(options) {
     const envelope = body ?? {};
     const source = endpoints.projections;
     const rows = [];
+    const index = await teamAbbrById();
     const base = {
       season: context.season,
       week,
@@ -705,17 +818,20 @@ function createTank01Provider(options) {
         player_id: `${name}-${externalId}`,
         name: text(entry.longName) ?? text(entry.espnName),
         position: text(entry.pos) ?? text(entry.position),
-        team: text(entry.team) ? teamAbbr(entry.team) : null,
+        team: resolveTeam(entry, index),
         // The live projections feed carries no opponent; fsnv2_sync_projections
-        // derives it from fsnv2.nfl_matchups on the way in (migration 0005).
-        opponent: text(entry.opponent) ? teamAbbr(entry.opponent) : null,
+        // derives it from fsnv2.nfl_matchups on the way in (migration 0005) —
+        // which only joins when `team` above is a franchise code the schedule
+        // also uses, hence resolving it through the dictionary rather than
+        // writing the payload's spelling straight through.
+        opponent: knownTeamAbbr(entry.opponent),
         fantasy_points: fantasyPointsOf(entry, context.scoringFormat),
         stats,
         raw: entry
       });
     }
     for (const entry of asRecords(envelope.teamDefenseProjections)) {
-      const abbr = defenseTeamAbbr(entry);
+      const abbr = defenseTeamAbbr(entry, index);
       if (!abbr) {
         logger.warn("skipping a team defense projection with no resolvable team", {
           key: text(entry.__key)
@@ -731,7 +847,7 @@ function createTank01Provider(options) {
         name: `${abbr} D/ST`,
         position: "DST",
         team: abbr,
-        opponent: text(entry.opponent) ? teamAbbr(entry.opponent) : null,
+        opponent: knownTeamAbbr(entry.opponent),
         fantasy_points: provided || (defenseFantasyPoints(entry) ?? 0),
         stats,
         raw: entry
@@ -743,17 +859,18 @@ function createTank01Provider(options) {
     const externalId = text(row.gameID) ?? text(row.__key);
     if (!externalId) return null;
     const fromId = teamsFromGameId(externalId);
-    const home = text(row.home) ?? text(row.homeTeam) ?? fromId.home;
-    const away = text(row.away) ?? text(row.awayTeam) ?? fromId.away;
-    if (!home || !away) return null;
+    const index = teamIndex ?? /* @__PURE__ */ new Map();
+    const home = knownTeamAbbr(row.home ?? row.homeTeam) ?? knownTeamAbbr(fromId.home) ?? index.get(text(row.teamIDHome) ?? "") ?? null;
+    const away = knownTeamAbbr(row.away ?? row.awayTeam) ?? knownTeamAbbr(fromId.away) ?? index.get(text(row.teamIDAway) ?? "") ?? null;
+    if (!home || !away || home === away) return null;
     const status = gameStatus(row.gameStatus ?? row.status);
     return {
       external_id: externalId,
       season: optionalNum(row.season) ?? context.season,
       week: optionalNum(row.gameWeek ? String(row.gameWeek).replace(/\D+/g, "") : null) ?? week,
       season_type: context.seasonType,
-      home_team: teamAbbr(home, home),
-      away_team: teamAbbr(away, away),
+      home_team: home,
+      away_team: away,
       home_score: optionalNum(row.homePts),
       away_score: optionalNum(row.awayPts),
       kickoff: kickoffIso({
@@ -792,11 +909,13 @@ function createTank01Provider(options) {
     }
     return games;
   }
-  function mapBoxScorePlayer(entry, context, week, gameId, teams) {
+  function mapBoxScorePlayer(entry, context, week, gameId, teams, index) {
     const externalId = text(entry.playerID) ?? text(entry.__key);
     if (!externalId) return null;
-    const team = text(entry.teamAbv) ?? text(entry.team);
-    const opponent = team && teams.home && teams.away ? teamAbbr(team) === teamAbbr(teams.home) ? teamAbbr(teams.away) : teamAbbr(teams.home) : null;
+    const team = resolveTeam(entry, index);
+    const home = knownTeamAbbr(teams.home);
+    const away = knownTeamAbbr(teams.away);
+    const opponent = team && home && away ? team === home ? away : home : null;
     const snapCounts = entry.snapCounts && typeof entry.snapCounts === "object" ? entry.snapCounts : {};
     const stats = statsOf(entry);
     return {
@@ -810,7 +929,7 @@ function createTank01Provider(options) {
       // Box-score entries carry no position; fsnv2_sync_weekly_stats fills it
       // from the synced player pool on the way in (migration 0005).
       position: text(entry.pos) ?? text(entry.position),
-      team: team ? teamAbbr(team) : null,
+      team,
       opponent,
       fantasy_points: fantasyPointsOf(entry, context.scoringFormat),
       stats,
@@ -825,6 +944,7 @@ function createTank01Provider(options) {
     const playable = games.filter((game) => game.status !== "canceled" && game.status !== "postponed").slice(0, env.maxGamesPerWeek);
     const rows = [];
     const seen = /* @__PURE__ */ new Set();
+    const index = await teamAbbrById();
     for (const game of playable) {
       const body = await get("boxScore", {
         gameID: game.external_id,
@@ -835,13 +955,14 @@ function createTank01Provider(options) {
       const envelope = body ?? {};
       const teams = { home: game.home_team, away: game.away_team };
       for (const entry of asRecords(envelope.playerStats)) {
-        const row = mapBoxScorePlayer(entry, context, week, game.external_id, teams);
+        const row = mapBoxScorePlayer(entry, context, week, game.external_id, teams, index);
         if (!row || seen.has(row.external_player_id)) continue;
         seen.add(row.external_player_id);
         rows.push(row);
       }
       for (const entry of asRecords(envelope.DST)) {
-        const abbr = defenseTeamAbbr(entry);
+        const keyed = /^home$/i.test(text(entry.__key) ?? "") ? game.home_team : /^away$/i.test(text(entry.__key) ?? "") ? game.away_team : null;
+        const abbr = defenseTeamAbbr(entry, index) ?? knownTeamAbbr(keyed);
         if (!abbr) continue;
         const externalId = `DST-${abbr}`;
         if (seen.has(externalId)) continue;
@@ -858,7 +979,7 @@ function createTank01Provider(options) {
           name: `${abbr} D/ST`,
           position: "DST",
           team: abbr,
-          opponent: abbr === teamAbbr(game.home_team) ? game.away_team : game.home_team,
+          opponent: abbr === knownTeamAbbr(game.home_team) ? game.away_team : game.home_team,
           fantasy_points: provided || (defenseFantasyPoints(entry) ?? 0),
           stats,
           snap_counts: {},

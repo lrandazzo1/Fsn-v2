@@ -31,6 +31,7 @@ import { handleSyncRequest, weeklyPlan } from '../lib/api/syncRoute.ts';
 import { createLogger, silentLogger } from '../lib/services/logger.ts';
 import { createSupabaseSyncRepository } from '../lib/services/syncRepository.ts';
 import { listProviders, resolveProvider } from '../lib/services/providers/index.ts';
+import { createTank01Provider } from '../lib/services/providers/tank01.ts';
 import { createMemoryRpc } from '../lib/services/testing/memoryRpc.ts';
 import type { SportsDataEnv } from '../lib/services/env.ts';
 import type { RpcTransport } from '../lib/services/syncRepository.ts';
@@ -241,6 +242,86 @@ async function phaseMapping(): Promise<void> {
       assert.ok(player.external_id && player.name, 'every row needs an id and a name');
       assert.match(player.team, /^[A-Z]{2,4}$/);
     }
+  });
+
+  await check('team codes resolve from teamAbv, then teamID — never a feed spelling', async () => {
+    // A payload in the spellings the live API actually uses: WSH for
+    // Washington, JAC for Jacksonville, and a roster entry that carries only a
+    // numeric teamID. All three have to land on the 32 codes the schedule, the
+    // projections and the UI are keyed by, or a player's opponent joins to
+    // nothing and the board shows someone else's game.
+    const teams = [
+      { teamID: '28', teamAbv: 'WSH', teamCity: 'Washington', teamName: 'Commanders' },
+      { teamID: '15', teamAbv: 'JAC', teamCity: 'Jacksonville', teamName: 'Jaguars' },
+      { teamID: '31', teamAbv: 'SF', teamCity: 'San Francisco', teamName: '49ers' }
+    ];
+    const rosters = [
+      {
+        ...teams[0],
+        Roster: { '1': { playerID: '1', longName: 'Terry McLaurin', pos: 'WR', team: 'WSH', teamID: '28' } }
+      },
+      {
+        ...teams[1],
+        Roster: { '2': { playerID: '2', longName: 'Brian Thomas Jr.', pos: 'WR', teamID: '15' } }
+      },
+      {
+        ...teams[2],
+        // No team on the row at all: the roster it appears on is the fallback.
+        Roster: { '3': { playerID: '3', longName: 'Deebo Samuel Sr.', pos: 'WR' } }
+      }
+    ];
+
+    const provider = createTank01Provider({
+      env: fixtureEnv({ provider: 'tank01' }),
+      logger: silentLogger,
+      http: {
+        calls: 0,
+        async getJson<T>(
+          path: string,
+          query: Record<string, string | number | boolean | undefined> = {}
+        ) {
+          const body = path.includes('getNFLTeams')
+            ? query.rosters === 'true'
+              ? rosters
+              : teams
+            : [
+                { gameID: '20260910_SF@WSH', gameWeek: 'Week 1', away: 'SF', home: 'WSH' },
+                { gameID: '20260910_JAC@LA', gameWeek: 'Week 1', away: 'JAC', home: 'LA' }
+              ];
+          return {
+            url: path,
+            status: 200,
+            json: { statusCode: 200, body } as T,
+            durationMs: 0
+          };
+        }
+      }
+    });
+
+    const mapped = await provider.fetchTeams(fixtureContext());
+    assert.deepEqual(
+      mapped.map((team) => team.abbr).sort(),
+      ['JAX', 'SF', 'WAS'],
+      'WSH and JAC fold onto WAS and JAX'
+    );
+
+    const players = await provider.fetchPlayers(fixtureContext());
+    const byName = new Map(players.map((player) => [player.name, player.team]));
+    assert.equal(byName.get('Terry McLaurin'), 'WAS', "from the row's own teamAbv");
+    assert.equal(byName.get('Brian Thomas Jr.'), 'JAX', 'from teamID via the dictionary');
+    assert.equal(byName.get('Deebo Samuel Sr.'), 'SF', 'from the roster it appeared on');
+    assert.equal(
+      players.some((player) => player.team === 'FA'),
+      false,
+      'no player may fall through to FA while its team is resolvable'
+    );
+
+    const games = await provider.fetchSchedules({ ...fixtureContext(), weeks: [1] });
+    assert.deepEqual(
+      games.map((game) => `${game.away_team}@${game.home_team}`).sort(),
+      ['JAX@LAR', 'SF@WAS'],
+      'both sides of a game use the same codes the players do'
+    );
   });
 
   await check('getNFLProjections → projections, stats flattened, defenses included', async () => {

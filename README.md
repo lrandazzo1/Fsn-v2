@@ -34,12 +34,13 @@ index.html              App shell: nav bar + the four view panes
 styles.css              Dark sports-network design system (position colour coding)
 js/config.js            Supabase credentials + league defaults (override via window.FSN_CONFIG)
 js/types.js             Player / Team / Pick / DraftState shapes + roster slot template
-js/playerData.js        The player pool (compact tuples -> Player objects)
+js/playerData.js        The offline seed pool (compact tuples -> Player objects)
 js/vorMath.js           Replacement levels, VOR, tiers, derived ADP, scarcity, recommendations
 js/draftTimer.js        The pick clock (injectable scheduler so tests run instantly)
 js/draftEngine.js       Snake state machine: pick progression, clock expiry, bots, undo, hydrate
 js/seasonEngine.js      Round-robin schedule, weekly score engine, W-L / PF / PA standings
-js/nflTeams.js          NFL colours, logo URLs and the synthetic weekly opponent slate
+js/nflTeams.js          NFL colours, logo URLs, team-code aliases and the real weekly slate
+js/nflData.js           The live Tank01 layer: real team codes and matchups, read back from Supabase
 js/persistence.js       DraftRepository + SeasonRepository — Supabase RPCs, localStorage mirror
 js/router.js            Hash router for the app shell
 js/uiRenderer.js        Draft-room rendering + shared view helpers
@@ -60,7 +61,7 @@ scripts/sync-data.ts    Sync CLI (npm run sync:data)
 scripts/test-sync-data.ts  Sync verification CLI (npm run test:sync-data)
 supabase/migrations/    Schema + RPC migrations (0004 adds the sync tables, 0005 the derivations)
 tests/engine.test.mjs   41 assertions: snake order, clock expiry, rosters, hydration
-tests/season.test.mjs   42 assertions: schedule, simulation, standings, hydration
+tests/season.test.mjs   51 assertions: schedule, simulation, standings, NFL matchups, hydration
 tests/draft-sim.test.mjs Full 15-round simulation + optional database round-trip
 ```
 
@@ -189,9 +190,30 @@ has to survive that CDN being blocked. The logo sits on top of a chip carrying
 the team's abbreviation in its primary colour, so a failed load degrades to the
 chip instead of a broken-image icon.
 
-> The weekly NFL opponents are synthetic, exactly like the projections in
-> `playerData.js`: a 32-team round robin over the same seeded shuffle. They are
-> display context next to a player's name, never an input to scoring.
+### Where a player's team and matchup come from
+
+Both come from the provider payload, and from nothing else.
+
+* **Team** — `js/nflData.js` reads the synced rosters (`fsnv2_players`, rows with
+  a `provider`) and rewrites every pool player's team with Tank01's own
+  `teamAbv`, resolving `teamID` through the `/getNFLTeams` dictionary when a row
+  carries only the id. Names join on a folded key, so "Deebo Samuel Sr." matches
+  "Deebo Samuel". The team column in `js/playerData.js` is a seed for offline
+  runs and is overwritten the moment real rosters are available — it is a
+  snapshot, and a snapshot is wrong the day a player is traded.
+* **Matchup** — `js/nflTeams.js` holds no schedule of its own. `setNflSchedule()`
+  is handed the real games (`fsnv2_nfl_schedule`, from `/getNFLGamesForWeek`) and
+  writes both sides of each one, so the label is a lookup:
+  `@ HOME` when the player's team is the away side, `vs AWAY` when it is the
+  home side, `BYE` when the week is loaded and the team has no game — and `—`
+  while the week has not loaded, because an invented opponent is indistinguishable
+  from a real one on screen.
+
+Feed spellings are folded onto the 32 franchise codes on both sides of the wire
+(`normalizeTeamAbbr()` in the browser, `teamAbbr()` / `knownTeamAbbr()` in
+`lib/services/normalize.ts`): WSH → WAS, JAC → JAX, OAK → LV, and so on. Without
+that a projection's `team` no longer joins to its game and a player renders
+someone else's opponent.
 
 ## Simulate Week (the dummy score engine)
 
@@ -329,7 +351,7 @@ Set `supabase.enabled = false` to run fully offline on localStorage.
 
 ## Background sports-data sync
 
-The draft board runs on the synthetic pool in `js/playerData.js`. The sync
+The draft board boots on the seed pool in `js/playerData.js`. The sync
 service replaces that with real NFL data — players, rosters, weekly projections,
 box scores and the schedule — on a schedule of its own, without the UI having to
 know where any of it came from.
@@ -546,13 +568,15 @@ and odd team counts, on-the-clock indexing through the turn, next-up previews,
 clock expiry (ADP pick, clean advance, single fire), full-draft roster legality,
 undo and hydration.
 
-`tests/season.test.mjs` (42 assertions) covers the schedule — 84 games, six a
+`tests/season.test.mjs` (51 assertions) covers the schedule — 84 games, six a
 week, every team once a week, all 66 pairings exactly once across weeks 1-11,
 weeks 12-14 as valid perfect matchings with the sides swapped — the shuffle
 vectors read back from Postgres, the score engine (totals equal the sum of the
 starters; scores sit near but not on the projection), the standings invariants
-(wins balance losses, league Points For equals Points Against) and the
-persistence round trip.
+(wins balance losses, league Points For equals Points Against), the NFL matchup
+layer (both game shapes parsed, home/away agreeing on each side, BYE only in a
+loaded week, `—` when nothing is loaded, feed spellings folded, and the synced
+rosters overwriting a stale seed team) and the persistence round trip.
 
 `npm run test:sync-data` verifies the ingestion layer in four phases and exits 0
 on a machine with no credentials and no network:

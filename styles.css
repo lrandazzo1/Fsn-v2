@@ -973,6 +973,8 @@ kbd {
 .matchup__player b { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-faint); }
 .matchup__player.is-win b { color: var(--brand-bright); }
 .matchup__player em { color: var(--text-faint); font-size: 11px; }
+/* The player's NFL matchup for the week on screen — "vs CLE", "@ PIT", "BYE". */
+.matchup__player small { color: var(--text-faint); font-size: 10px; letter-spacing: 0.02em; }
 .matchup__slot { text-align: center; }
 
 .badge--flex { background: rgba(148, 163, 184, 0.18); color: #cbd5e1; border-color: rgba(148, 163, 184, 0.4); }

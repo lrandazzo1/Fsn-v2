@@ -60,11 +60,46 @@ export function fantasyPosition(value: unknown): FantasyPosition | null {
   return POSITION_ALIASES[raw.toUpperCase()] ?? null;
 }
 
+/**
+ * Feeds disagree about a handful of team codes. Tank01 sends WSH for
+ * Washington and JAC for Jacksonville; other hosts still carry relocated
+ * franchises (OAK, SD, STL) or three-letter variants (KAN, NWE, SFO). Storing
+ * them verbatim means the UI's team table misses the row, and a projection's
+ * `team` no longer joins to its game in fsnv2.nfl_matchups — which is exactly
+ * how a player ends up with someone else's opponent.
+ *
+ * Mirrored by TEAM_ALIASES in js/nflTeams.js — keep the two in step.
+ */
+const TEAM_ALIASES: Record<string, string> = {
+  WSH: 'WAS', WFT: 'WAS', WSN: 'WAS',
+  JAC: 'JAX',
+  LA: 'LAR', STL: 'LAR', RAM: 'LAR',
+  SD: 'LAC', SDG: 'LAC',
+  OAK: 'LV', RAI: 'LV', LVR: 'LV',
+  ARZ: 'ARI', BLT: 'BAL', CLV: 'CLE', HST: 'HOU',
+  TAM: 'TB', KAN: 'KC', NOR: 'NO', NWE: 'NE', SFO: 'SF', GNB: 'GB',
+  NOS: 'NO', TBB: 'TB'
+};
+
+/** The 32 franchise codes everything downstream is keyed by. */
+export const NFL_TEAM_ABBRS = new Set([
+  'ARI', 'ATL', 'BAL', 'BUF', 'CAR', 'CHI', 'CIN', 'CLE', 'DAL', 'DEN', 'DET', 'GB',
+  'HOU', 'IND', 'JAX', 'KC', 'LAC', 'LAR', 'LV', 'MIA', 'MIN', 'NE', 'NO', 'NYG',
+  'NYJ', 'PHI', 'PIT', 'SEA', 'SF', 'TB', 'TEN', 'WAS'
+]);
+
 /** Team abbreviations are compared and stored uppercase; free agents are 'FA'. */
 export function teamAbbr(value: unknown, fallback = 'FA'): string {
   const raw = text(value);
   if (!raw) return fallback;
-  return raw.toUpperCase();
+  const upper = raw.toUpperCase();
+  return TEAM_ALIASES[upper] ?? upper;
+}
+
+/** The same, but null for anything that is not one of the 32 franchises. */
+export function knownTeamAbbr(value: unknown): string | null {
+  const abbr = teamAbbr(value, '');
+  return NFL_TEAM_ABBRS.has(abbr) ? abbr : null;
 }
 
 const GAME_STATUS_ALIASES: Array<[RegExp, GameStatus]> = [

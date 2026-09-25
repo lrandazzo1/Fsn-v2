@@ -1,12 +1,20 @@
 /**
  * playerData.js
  * -----------------------------------------------------------------------------
- * The raw player pool. Rows are compact tuples to keep the file readable:
+ * The offline seed pool. Rows are compact tuples to keep the file readable:
  *
  *   [ name, position, nflTeam, projectedPoints ]
  *
- * Projections are synthetic sample data for demo/testing purposes — swap this
- * module for a fetch() against your projections API and nothing else changes.
+ * Projections are synthetic sample data for demo/testing purposes.
+ *
+ * IMPORTANT — the `nflTeam` column is a *seed*, not a source of truth. A team
+ * code in a checked-in file is wrong the day a player is traded, which is how
+ * Deebo Samuel came to be listed on WAS long after he was a 49er again. As soon
+ * as the synced Tank01 rosters are available, `NflDataService.applyTeams()`
+ * (js/nflData.js) overwrites every one of these codes with the provider's own
+ * `teamAbv`. Nothing in the UI should read a team from here directly, and
+ * nothing here is ever used to build a matchup — the slate comes from
+ * fsnv2_nfl_schedule (js/nflTeams.js).
  */
 
 /** @type {Array<[string, string, string, number]>} */
@@ -139,7 +147,7 @@ export const RAW_PLAYERS = [
   ['Jordan Addison', 'WR', 'MIN', 190],
   ['Khalil Shakir', 'WR', 'BUF', 186],
   ['Ricky Pearsall', 'WR', 'SF', 182],
-  ['Deebo Samuel', 'WR', 'WAS', 180],
+  ['Deebo Samuel', 'WR', 'SF', 180],
   ['Jakobi Meyers', 'WR', 'LV', 178],
   ['Stefon Diggs', 'WR', 'NE', 175],
   ['Keon Coleman', 'WR', 'BUF', 172],

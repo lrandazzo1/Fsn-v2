@@ -12,7 +12,7 @@
  * read the same week.
  */
 
-import { opponentLabel, teamColor, teamLogoUrl } from '../nflTeams.js';
+import { annotatePlayers, playerOpponentLabel, teamColor, teamLogoUrl } from '../nflTeams.js';
 import { badge, escapeHtml, refreshIcons, renderTeamOptions } from '../uiRenderer.js';
 
 export function createMatchupView({ engine, season, ui, router, onSimulateWeek, onSimulateThrough, onResetSeason }) {
@@ -85,6 +85,13 @@ export function createMatchupView({ engine, season, ui, router, onSimulateWeek, 
     const week = ui.week || 1;
     const mode = ui.matchupMode || 'mine';
     const played = season.isWeekPlayed(week);
+
+    // Re-stamp {player.team, player.opponent} whenever the week on screen moves,
+    // so every lineup row below reads the matchup for *this* week.
+    if (ui.nflWeek !== week) {
+      ui.nflWeek = week;
+      annotatePlayers(engine.playersById, week);
+    }
 
     el.title.textContent = `Week ${week}`;
     el.sub.textContent = `${season.weeks}-week season · ${season.matchupsForWeek(week).length} head-to-head games · ${
@@ -248,7 +255,7 @@ export function createMatchupView({ engine, season, ui, router, onSimulateWeek, 
     const meta = `
       <span class="h2h__player-main">
         <span class="h2h__player-name">${escapeHtml(player.name)}</span>
-        <span class="h2h__player-meta">${player.position} · ${escapeHtml(opponentLabel(player.team, week))}</span>
+        <span class="h2h__player-meta">${player.position} · ${escapeHtml(player.team)} · ${escapeHtml(playerOpponentLabel(player, week))}</span>
       </span>`;
     const pts = `<b class="${winning ? 'is-win' : ''}">${fmt(points)}</b>`;
     const logo = teamLogoHtml(player.team);
