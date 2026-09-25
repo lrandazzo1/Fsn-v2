@@ -253,8 +253,9 @@ async function phaseMapping(): Promise<void> {
     assert.equal(williams.scoring_format, 'ppr');
     assert.equal(williams.fantasy_points, 19.4, 'string fantasy points should coerce to a number');
     assert.equal(williams.stats['passing.passYds'], 248.6, 'nested stat groups should flatten');
-    assert.equal(williams.opponent, 'MIN');
     assert.equal(williams.player_id, 'fixture-4430807');
+    // The live feed sends no opponent on projections; the database derives it.
+    assert.equal(williams.opponent, null);
 
     assert.equal(williams.stats.playerID, undefined, 'identity fields are not statistics');
     assert.equal(williams.stats.teamID, undefined);
@@ -273,6 +274,7 @@ async function phaseMapping(): Promise<void> {
     );
     assert.equal(defense.position, 'DST');
     assert.equal(defense.fantasy_points, 8.2);
+    assert.equal(defense.opponent, 'CHI', 'defense rows do carry an opponent');
   });
 
   await check('getNFLGamesForWeek → schedule rows with UTC kickoffs and statuses', async () => {
@@ -317,6 +319,8 @@ async function phaseMapping(): Promise<void> {
     assert.equal(jefferson.stats['snapcounts.offSnaps'], undefined, 'snaps live in their own column');
     assert.equal(jefferson.game_external_id, '20260913_CHI@MIN');
     assert.equal(jefferson.week, WEEK);
+    // Box-score entries carry no position; the database fills it in.
+    assert.equal(jefferson.position, null);
 
     const defense = need(
       rows.find((row) => row.external_player_id === 'DST-MIN'),
@@ -415,6 +419,95 @@ async function phaseDatabase(): Promise<void> {
     assert.equal(second.updated, 2);
     assert.equal(memory.store.schedules.size, 2);
     assert.equal(memory.store.schedules.get('fixture:20260913_CHI@MIN')?.status, 'final');
+  });
+
+  await check("a projection's opponent is derived from the synced schedule", async () => {
+    const memory = createMemoryRpc();
+    const service = fixtureService({ rpc: memory.rpc });
+
+    // Order matters, and it is the order the weekly cron runs in.
+    await service.syncSchedules({ weeks: [WEEK] });
+    await service.syncWeeklyProjections(WEEK);
+
+    const williams = need(
+      memory.store.projections.get(`fixture:${SEASON}:reg:${WEEK}:ppr:4430807`),
+      'Caleb Williams projection'
+    );
+    // CHI are away at MIN in the fixture week, so the opponent is MIN.
+    assert.equal(williams.team, 'CHI');
+    assert.equal(williams.opponent, 'MIN');
+
+    const jefferson = need(
+      memory.store.projections.get(`fixture:${SEASON}:reg:${WEEK}:ppr:4262921`),
+      'Justin Jefferson projection'
+    );
+    // MIN are at home, so the other side of the same game.
+    assert.equal(jefferson.opponent, 'CHI');
+  });
+
+  await check("a box-score row's position is derived from the synced player pool", async () => {
+    const memory = createMemoryRpc();
+    const service = fixtureService({ rpc: memory.rpc });
+
+    await service.syncPlayersAndRosters();
+    await service.syncBoxScores(WEEK);
+
+    const jefferson = need(
+      memory.store.weeklyStats.get(`fixture:${SEASON}:reg:${WEEK}:4262921`),
+      'Justin Jefferson box score'
+    );
+    assert.equal(jefferson.position, 'WR', 'position comes from fsnv2.players');
+
+    const santos = need(
+      memory.store.weeklyStats.get(`fixture:${SEASON}:reg:${WEEK}:17427`),
+      'Cairo Santos box score'
+    );
+    assert.equal(santos.position, 'K', 'the PK normalisation carries through');
+  });
+
+  await check('an unsynced game or player leaves the column null rather than failing', async () => {
+    const memory = createMemoryRpc();
+    const service = fixtureService({ rpc: memory.rpc });
+
+    // Nothing else synced first: no schedule, no players.
+    const projections = await service.syncWeeklyProjections(WEEK);
+    const boxScores = await service.syncBoxScores(WEEK);
+    assert.equal(projections.ok, true, projections.errors.join(' | '));
+    assert.equal(boxScores.ok, true, boxScores.errors.join(' | '));
+
+    assert.equal(
+      need(
+        memory.store.projections.get(`fixture:${SEASON}:reg:${WEEK}:ppr:4430807`),
+        'projection'
+      ).opponent,
+      null
+    );
+    assert.equal(
+      need(memory.store.weeklyStats.get(`fixture:${SEASON}:reg:${WEEK}:4262921`), 'box score')
+        .position,
+      null
+    );
+  });
+
+  await check('a re-run never trades a derived value back for a null', async () => {
+    const memory = createMemoryRpc();
+    const service = fixtureService({ rpc: memory.rpc });
+
+    await service.syncPlayersAndRosters();
+    await service.syncSchedules({ weeks: [WEEK] });
+    await service.syncWeeklyProjections(WEEK);
+    await service.syncBoxScores(WEEK);
+
+    const projectionKey = `fixture:${SEASON}:reg:${WEEK}:ppr:4430807`;
+    const statsKey = `fixture:${SEASON}:reg:${WEEK}:4262921`;
+    assert.equal(need(memory.store.projections.get(projectionKey), 'projection').opponent, 'MIN');
+    assert.equal(need(memory.store.weeklyStats.get(statsKey), 'box score').position, 'WR');
+
+    // The provider keeps sending null for both; the stored values must survive.
+    await service.syncWeeklyProjections(WEEK);
+    await service.syncBoxScores(WEEK);
+    assert.equal(need(memory.store.projections.get(projectionKey), 'projection').opponent, 'MIN');
+    assert.equal(need(memory.store.weeklyStats.get(statsKey), 'box score').position, 'WR');
   });
 
   await check('rows go up in batches of SPORTS_DATA_BATCH_SIZE', async () => {
