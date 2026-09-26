@@ -34,6 +34,7 @@ import { compareMarket, draftRestricted, mapSleeperMarket } from './sleeperMarke
 import { sleeperRanksSnapshot } from './sleeperRanksSnapshot.js';
 import { loadPlayers } from './playerData.js';
 import { PickTimer } from './draftTimer.js';
+import { validLineup } from './lineup.js';
 
 /* ---------------------------------------------------------------------------
  * Pure snake helpers — no engine instance required, so the renderer, the bots,
@@ -381,6 +382,22 @@ export class DraftEngine {
   /** @returns {Record<string, string|null>} slot key -> player id */
   rosterFor(teamId) {
     return this.rosters[teamId];
+  }
+
+  /** Replace slot assignments only when every drafted player remains exactly once. */
+  setLineup(teamId, roster) {
+    const team = this.teamById(teamId);
+    if (!team || !validLineup(roster, this.playersById, team.roster)) return false;
+    this.rosters[teamId] = { ...roster };
+    this.emit('change', { reason: 'lineup', teamId });
+    return true;
+  }
+
+  starterVor(teamId) {
+    return round1(ROSTER_SLOTS.filter((slot) => slot.starter).reduce((sum, slot) => {
+      const id = this.rosters[teamId][slot.key];
+      return sum + (id ? this.playersById[id].vor : 0);
+    }, 0));
   }
 
   /** Counts of rostered players by position for a team. */

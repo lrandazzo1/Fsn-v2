@@ -66,6 +66,7 @@ export const CONFIG = {
   storageKeys: {
     draft: 'fsnv2.draft.v1',
     ids: 'fsnv2.ids.v1',
-    season: 'fsnv2.season.v1'
+    season: 'fsnv2.season.v1',
+    lineup: 'fsnv2.lineup.v1'
   }
 };

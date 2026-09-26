@@ -194,6 +194,8 @@ export class SeasonEngine {
 
     /** `${week}:${playerId}` -> points scored that week. */
     this.scores = new Map();
+    /** Frozen slot assignments for completed weeks. */
+    this.scoreRows = new Map();
 
     /**
      * Set by setLiveProjections() once the sync's numbers have been read.
@@ -220,6 +222,7 @@ export class SeasonEngine {
       // season and one read back from Postgres are indistinguishable.
       .sort((a, b) => a.week - b.week || a.teamAId - b.teamAId);
     this.scores.clear();
+    this.scoreRows.clear();
     this.emit('change', { reason: 'generate' });
     return this.matchups;
   }
@@ -270,10 +273,14 @@ export class SeasonEngine {
    *
    * @returns {Array<{slot: typeof STARTER_SLOTS[number], player: import('./types.js').Player|null}>}
    */
-  lineup(teamId) {
+  lineup(teamId, week = null) {
     const roster = this.engine.rosterFor(teamId) || {};
+    const final = week !== null && this.matchupForTeam(week, teamId)?.status === 'final';
+    const hasSnapshot = final && STARTER_SLOTS.some((slot) => this.scoreRows.has(`${week}:${teamId}:${slot.key}`));
     return STARTER_SLOTS.map((slot) => {
-      const playerId = roster[slot.key];
+      const playerId = hasSnapshot
+        ? this.scoreRows.get(`${week}:${teamId}:${slot.key}`)?.player_id ?? null
+        : roster[slot.key];
       return { slot, player: playerId ? this.engine.playersById[playerId] : null };
     });
   }
@@ -502,6 +509,7 @@ export class SeasonEngine {
           projected,
           points
         });
+        this.scoreRows.set(`${week}:${team.id}:${slotKey}`, { player_id: playerId, slot: slotKey, team_id: team.id, week, points });
       });
     });
 
@@ -541,10 +549,13 @@ export class SeasonEngine {
       game.status = 'scheduled';
     });
 
-    if (week === null) this.scores.clear();
+    if (week === null) { this.scores.clear(); this.scoreRows.clear(); }
     else {
       [...this.scores.keys()].forEach((key) => {
         if (key.startsWith(`${week}:`)) this.scores.delete(key);
+      });
+      [...this.scoreRows.keys()].forEach((key) => {
+        if (key.startsWith(`${week}:`)) this.scoreRows.delete(key);
       });
     }
 
@@ -660,10 +671,15 @@ export class SeasonEngine {
     }
 
     this.scores.clear();
+    this.scoreRows.clear();
     scores.forEach((row) => {
       const playerId = row.player_id ?? row.playerId;
       if (!playerId) return;
       this.scores.set(`${row.week}:${playerId}`, Number(row.points));
+      if (row.slot && (row.team_id ?? row.teamId)) {
+        const teamId = row.team_id ?? row.teamId;
+        this.scoreRows.set(`${row.week}:${teamId}:${row.slot}`, { ...row, player_id: playerId });
+      }
     });
 
     this.emit('change', { reason: 'hydrate', weeks: this.weeks });
@@ -686,7 +702,8 @@ export class SeasonEngine {
       })),
       scores: [...this.scores.entries()].map(([key, points]) => {
         const [week, playerId] = splitScoreKey(key);
-        return { week, player_id: playerId, points };
+        const snapshot = [...this.scoreRows.values()].find((row) => Number(row.week) === week && row.player_id === playerId);
+        return { week, player_id: playerId, points, ...(snapshot ? { team_id: snapshot.team_id ?? snapshot.teamId, slot: snapshot.slot } : {}) };
       })
     };
   }

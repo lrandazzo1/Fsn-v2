@@ -136,7 +136,7 @@ async function init() {
     onSimulateThrough: simulateThrough,
     onResetSeason: resetSeason
   });
-  views.team = createTeamView({ engine, season, ui, router,
+  views.team = createTeamView({ engine, season, ui, router, persistLineup,
     onWeekChange: (week) => void liveMatchupStats.fetchWeek(week) });
 
   season.on('change', onSeasonChange);
@@ -151,6 +151,7 @@ async function init() {
   await loadLiveData();
 
   await restoreDraft();
+  await restoreLineup();
   await restoreSeason();
   if (CONFIG.sportsData.enabled) {
     liveMatchupsReady = true;
@@ -256,6 +257,54 @@ async function loadLiveData() {
 function setNflWeek(week) {
   ui.nflWeek = Number(week) || 1;
   annotatePlayers(engine.playersById, ui.nflWeek);
+}
+
+function lineupStorageKey() {
+  return `${CONFIG.storageKeys.lineup}.${repo.draftId || 'offline'}.${engine.userTeamId}`;
+}
+
+function saveLineupLocal(roster, version) {
+  try {
+    localStorage.setItem(lineupStorageKey(), JSON.stringify({ roster, version }));
+  } catch { /* storage is optional */ }
+}
+
+async function restoreLineup() {
+  if (repo.enabled && repo.draftId) {
+    try {
+      await repo.drain();
+      const response = await fetch(`/api/roster/swap?draftId=${encodeURIComponent(repo.draftId)}&teamId=${engine.userTeamId}`, { cache: 'no-store' });
+      if (!response.ok) throw new Error('Lineup endpoint unavailable.');
+      const saved = await response.json();
+      if (views.team.lineup.hydrate(saved.roster, saved.version)) {
+        saveLineupLocal(saved.roster, saved.version);
+      }
+      return;
+    } catch (error) {
+      toast(`Lineup sync unavailable: ${error.message}`, 'warn');
+    }
+  }
+  try {
+    const saved = JSON.parse(localStorage.getItem(lineupStorageKey()) || 'null');
+    if (saved?.roster) views.team.lineup.hydrate(saved.roster, saved.version);
+  } catch { /* ignore invalid local snapshots */ }
+}
+
+async function persistLineup(swap) {
+  if (!repo.enabled || !repo.draftId) {
+    saveLineupLocal(engine.rosterFor(engine.userTeamId), swap.expectedVersion + 1);
+    return { roster: engine.rosterFor(engine.userTeamId), version: swap.expectedVersion + 1 };
+  }
+  await repo.drain();
+  const response = await fetch('/api/roster/swap', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ draftId: repo.draftId, teamId: engine.userTeamId, ...swap })
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || 'Server rejected the swap.');
+  saveLineupLocal(result.roster, result.version);
+  return result;
 }
 
 /**
