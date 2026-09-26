@@ -56,7 +56,7 @@ const playersById = {
   'p-caleb': { id: 'p-caleb', name: 'Caleb Williams', position: 'QB', team: 'CHI', projection: 340 },
   'p-jefferson': { id: 'p-jefferson', name: 'Justin Jefferson', position: 'WR', team: 'MIN', projection: 300 },
   'p-jacobs': { id: 'p-jacobs', name: 'Josh Jacobs', position: 'RB', team: 'GB', projection: 265,
-    status: 'Active' },
+    status: 'Active', searchRank: 20 },
   'p-bench': { id: 'p-bench', name: 'Bench Player', position: 'RB', team: 'CHI', projection: 120 }
 };
 const engine = {
@@ -75,6 +75,7 @@ season.setLiveMatchupStats(3, payload, playersById);
 assert.equal(inactiveStatus(playersById['p-jacobs']), 'EX');
 assert.equal(season.weeklyProjection(playersById['p-jacobs'], 3), 0);
 assert.equal(playersById['p-jacobs'].projectedPoints, 0);
+assert.equal(playersById['p-jacobs'].adp, 151);
 assert.equal(season.projectedTotal(1, 3), 20);
 const activeGame = season.matchupsForWeek(3)[0];
 assert.equal(season.winProbabilityFor(activeGame),
@@ -85,6 +86,7 @@ season.setLiveMatchupStats(3, { ...payload, statuses: [{
 }] }, playersById);
 assert.equal(inactiveStatus(playersById['p-jacobs']), null);
 assert.equal(season.weeklyProjection(playersById['p-jacobs'], 3), 15.6);
+assert.equal(playersById['p-jacobs'].adp, 20);
 season.setLiveMatchupStats(3, payload, playersById);
 assert.equal(season.livePointFor(3, playersById['p-caleb']), 19.44);
 assert.equal(season.livePointFor(3, playersById['p-bench']), 0);

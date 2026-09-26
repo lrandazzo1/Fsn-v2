@@ -27,6 +27,7 @@
 import { ROSTER_SLOTS } from './types.js';
 import { playerKey, teamAbbr } from './liveData.js';
 import { inactiveStatus } from './statsEngine.js';
+import { marketRank } from './sleeperMarket.js';
 
 /** Weeks in the fantasy regular season. */
 export const SEASON_WEEKS = 14;
@@ -362,6 +363,7 @@ export class SeasonEngine {
         player.injuryStatus = row.injury_status;
         player.newsStatus = row.news_status;
         player.injury = { designation: row.injury_status, news_status: row.news_status };
+        player.adp = marketRank(player);
       }
     }
     const games = new Map();
