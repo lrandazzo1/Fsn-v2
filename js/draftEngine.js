@@ -31,7 +31,6 @@ import {
 } from './types.js';
 import { draftValue, enrichPlayers, recommendPlayers } from './vorMath.js';
 import { loadPlayers } from './playerData.js';
-import { applyPlayerAssets, emptyPlayerAssets } from './playerAssets.js';
 import { PickTimer } from './draftTimer.js';
 
 /* ---------------------------------------------------------------------------
@@ -104,13 +103,6 @@ export class DraftEngine {
     /** @type {Map<string, Function[]>} */
     this.listeners = new Map();
 
-    /**
-     * Headshots and external ids, keyed for lookup. Held on the engine rather
-     * than in a view because `reset()` rebuilds the pool from playerData.js —
-     * whatever the database told us has to survive that.
-     */
-    this.playerAssets = emptyPlayerAssets();
-
     this.clock = new PickTimer({
       seconds: this.config.timerSeconds,
       scheduler: this.config.scheduler,
@@ -123,6 +115,27 @@ export class DraftEngine {
   }
 
   // ---------------------------------------------------------------- lifecycle
+
+  /**
+   * Swaps the player pool and rebuilds the board around it.
+   *
+   * Used at boot to move the room off the static pool in playerData.js and onto
+   * the rows read from `fsnv2.players`, which carry the roster the sports-data
+   * sync established. It resets the draft, so it has to run *before* any picks
+   * are hydrated; a pool that is empty or malformed is refused outright so a
+   * bad read can never leave the room with no players in it.
+   *
+   * @param {import('./types.js').Player[]} players
+   * @returns {boolean} whether the pool was accepted
+   */
+  usePlayerPool(players) {
+    if (!Array.isArray(players) || players.length === 0) return false;
+    if (this.picks.length > 0) return false;
+
+    this.config.players = players;
+    this.reset();
+    return true;
+  }
 
   /** Rebuilds a fresh draft with the current configuration. */
   reset({ silent = false } = {}) {
@@ -137,7 +150,6 @@ export class DraftEngine {
     pool.forEach((player) => {
       this.playersById[player.id] = player;
     });
-    applyPlayerAssets(this.playersById, this.playerAssets);
 
     this.teams = Array.from({ length: teamCount }, (_, index) => {
       const id = index + 1;
@@ -159,21 +171,6 @@ export class DraftEngine {
 
     if (!silent) this.emit('change', { reason: 'reset' });
     if (this.config.autoStartClock && !silent) this.startClock();
-  }
-
-  /**
-   * Merges the database's player imagery into the pool and keeps the index so
-   * `reset()` can re-apply it. Emits `change` so every open view repaints with
-   * the headshots the moment the read lands.
-   *
-   * @param {ReturnType<import('./playerAssets.js').indexPlayerAssets>} index
-   * @returns {number} how many players gained a headshot
-   */
-  setPlayerAssets(index) {
-    this.playerAssets = index || emptyPlayerAssets();
-    const matched = applyPlayerAssets(this.playersById, this.playerAssets);
-    if (matched > 0) this.emit('change', { reason: 'assets', matched });
-    return matched;
   }
 
   // ------------------------------------------------------------------ getters

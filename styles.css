@@ -135,14 +135,24 @@ kbd {
   color: var(--brand-bright);
 }
 
-.clock__team { min-width: 0; flex: 1 1 auto; }
+/* The on-the-clock team. `min-width` is a readability floor, not a layout
+   hint: without it the flex row happily squeezes this to 0px and the name
+   disappears entirely (it was rendering as "R…", then as nothing at all, on a
+   320px screen). The floor is in `ch` so it tracks the font, and it is small
+   enough that the buttons still win the fight for space on a wide row. */
+.clock__team {
+  min-width: 11ch;
+  flex: 1 1 auto;
+}
 .clock__eyebrow {
   display: inline-flex; align-items: center; gap: 6px;
   font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--text-faint);
 }
 .clock__team h2 {
   margin: 2px 0 0;
-  font-size: 19px;
+  /* Scales with the viewport between the two ends rather than clipping: 15px on
+     a phone, 19px once there is room. `clamp` keeps it off both extremes. */
+  font-size: clamp(15px, 1.35vw + 10px, 19px);
   font-weight: 700;
   letter-spacing: -0.01em;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -484,7 +494,7 @@ kbd {
 
 .player-row {
   display: grid;
-  /* avatar · position badge · name+meta · stats (· owner) */
+  /* headshot avatar · position badge · name+meta · stats (· owner) */
   grid-template-columns: 26px 38px minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
@@ -598,6 +608,20 @@ kbd {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .roster-slot__team { font-size: 10px; color: var(--text-faint); }
+
+/* The week's NFL fixture next to a rostered player ("@ MIA" / "vs NYJ").
+   `.is-projected` marks a week the sports-data sync has not covered, where the
+   opponent comes from the synthetic round robin rather than the real slate —
+   dimmed and italic so it never reads as a real fixture. */
+.roster-slot__opp {
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding-right: 8px;
+}
+.roster-slot__opp.is-projected { color: var(--text-faint); font-style: italic; opacity: 0.75; }
 .roster-slot__pts { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-dim); }
 
 /* ------------------------------------------------------- recs + scarcity */
@@ -975,6 +999,8 @@ kbd {
 .matchup__player b { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-faint); }
 .matchup__player.is-win b { color: var(--brand-bright); }
 .matchup__player em { color: var(--text-faint); font-size: 11px; }
+/* The player's NFL matchup for the week on screen — "vs CLE", "@ PIT", "BYE". */
+.matchup__player small { color: var(--text-faint); font-size: 10px; letter-spacing: 0.02em; }
 .matchup__slot { text-align: center; }
 
 .badge--flex { background: rgba(148, 163, 184, 0.18); color: #cbd5e1; border-color: rgba(148, 163, 184, 0.4); }
@@ -1006,13 +1032,21 @@ kbd {
   .next-up__item:nth-child(n + 3) { display: none; }
 }
 
-/* No room for the queue at all — hide it rather than collapse it to 0px. */
-@media (max-width: 1279px) {
+/* No room for the queue at all — hide it rather than collapse it to 0px.
+   This has to fire well before the header wraps: between here and 1280px the
+   queue is the only thing that can give, and if it does not, the space comes
+   out of the team name instead (94px, mid-word, at exactly 1280). */
+@media (max-width: 1399px) {
   .next-up { display: none; }
 }
 
-/* Below this the buttons need their own row; the header wraps on purpose. */
-@media (max-width: 1100px) {
+/* Below this the buttons need their own row; the header wraps on purpose.
+   The step matches the one above on purpose: the moment the queue has to be
+   hidden, the row is already too tight to also hold seven buttons *and* a
+   readable team name, and the name was the thing quietly losing (clipped to
+   87px at 1280, 131px at 1180). Wrapping costs one row of height and keeps
+   every element legible. */
+@media (max-width: 1279px) {
   .draft-header { flex-wrap: wrap; gap: 14px; }
   .draft-header__status { flex: 1 1 100%; }
   .draft-header__controls {
@@ -1021,6 +1055,33 @@ kbd {
     margin-left: 0;
     flex: 1 1 100%;
   }
+}
+
+/* Phones. The counters, the name and the ring cannot share one line at this
+   width — 360px leaves the name about 30px once the rest have taken theirs. So
+   the name gets a line of its own above them, full width, and the counters and
+   the ring keep the row below. Nothing is hidden and nothing overlaps. */
+@media (max-width: 560px) {
+  .clock {
+    flex-wrap: wrap;
+    gap: 12px 14px;
+  }
+  .clock__team {
+    order: -1;
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+  .clock__team h2 {
+    /* Full width now, so it can use it. */
+    font-size: 18px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .clock__team p {
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .clock__counters { flex: 0 0 auto; }
+  .pick-clock { margin-left: auto; }
 }
 
 /* =============================================================================
@@ -1161,18 +1222,55 @@ kbd {
   padding: 2px;
 }
 
+/*
+ * The corner badge is the shared .team-logo chip, shrunk: at 12px the
+ * abbreviation inside it is unreadable, so it is hidden and the chip's team
+ * colour does the work when the logo itself cannot load.
+ */
 .player-avatar__team {
   position: absolute; right: -2px; bottom: -2px;
-  width: 12px; height: 12px;
-  display: grid; place-items: center;
+  width: 13px; height: 13px;
   border-radius: 999px;
-  background: rgba(7, 9, 13, 0.92);
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.14);
+  box-shadow: 0 0 0 1.5px var(--ink-850);
   overflow: hidden;
 }
-.player-avatar--md .player-avatar__team { width: 14px; height: 14px; right: -3px; bottom: -3px; }
-.player-avatar--xs .player-avatar__team { width: 10px; height: 10px; }
-.player-avatar__team img { width: 100%; height: 100%; object-fit: contain; }
+.player-avatar--md .player-avatar__team { width: 15px; height: 15px; right: -3px; bottom: -3px; }
+.player-avatar--xs .player-avatar__team { width: 11px; height: 11px; }
+/* Specific enough to beat the row-level .team-logo sizing further down. */
+.player-avatar .player-avatar__team .team-logo { width: 100%; height: 100%; }
+.player-avatar .player-avatar__team .team-logo__abbr { display: none; }
+.player-avatar .player-avatar__team .team-logo img { background: rgba(7, 9, 13, 0.82); }
+
+/* ------------------------------------------------------- team logo chip --- */
+/* The shared team badge (teamLogoHtml in js/nflTeams.js). A player row wears
+   the avatar above, which carries this chip in its corner. */
+
+.team-logo {
+  position: relative;
+  display: grid; place-items: center;
+  width: 22px; height: 22px;
+  flex: none;
+  border-radius: 999px;
+  background: var(--team-color, #475569);
+  overflow: hidden;
+}
+.team-logo__abbr {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 7px; font-weight: 600; letter-spacing: -0.02em;
+  color: #fff;
+  mix-blend-mode: normal;
+}
+.team-logo img {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: contain;
+  background: rgba(7, 9, 13, 0.55);
+}
+/* Tighter rows carry the same chip a size down. */
+.roster-slot .team-logo,
+.matchup__player .team-logo { width: 18px; height: 18px; }
+.roster-slot .team-logo__abbr,
+.matchup__player .team-logo__abbr { font-size: 6px; }
 
 /* ----------------------------------------------------------- head to head -- */
 
@@ -1268,6 +1366,9 @@ kbd {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
 }
 .h2h__player-meta { font-size: 10.5px; color: var(--text-faint); white-space: nowrap; }
+/* Same convention as .roster-slot__opp: an opponent the sync has not published
+   is shown in italics rather than passed off as the real fixture. */
+.h2h__player-meta.is-projected { font-style: italic; opacity: 0.8; }
 .h2h__player b {
   font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 600;
   color: var(--text-dim); flex: none; min-width: 42px; text-align: right;

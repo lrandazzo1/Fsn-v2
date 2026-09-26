@@ -5,12 +5,19 @@
  * `public.fsnv2_record_pick` RPC, which re-derives the snake order server-side
  * and rejects anything out of sequence.
  *
+ * It is also the read side of the sports-data sync: `liveBundle()` pulls the
+ * synced player pool, the week's provider projections and the real NFL slate
+ * through the four read RPCs, which are granted to `anon` so the publishable
+ * key is enough.
+ *
  * Design notes
  *  - Plain `fetch` against PostgREST rather than the supabase-js bundle, so the
  *    exact same module runs in the browser and in the Node test-suite.
  *  - Writes are queued and retried; the UI never blocks on the network.
  *  - A localStorage mirror is always kept, so a refresh restores the room even
  *    when Supabase is unreachable or disabled.
+ *  - Reads resolve to null instead of throwing, so every caller has a working
+ *    offline path.
  */
 
 import { CONFIG } from './config.js';
@@ -116,7 +123,15 @@ export class DraftRepository {
     return { leagueId: this.leagueId, draftId: this.draftId, state: null, created: true };
   }
 
-  /** Pushes the local projection pool into `fsnv2.players` in batches. */
+  /**
+   * Pushes the local projection pool into `fsnv2.players` in batches.
+   *
+   * The `team` on these rows is only ever a starting point: since migration
+   * 0006, fsnv2_upsert_players() prefers the team the sports-data sync
+   * established over the one sent from here, so a stale static row can no
+   * longer move a player back off his real roster. adp and `stats` are the
+   * browser's own numbers and are written as sent.
+   */
   async syncPlayers(players, batchSize = 120) {
     const rows = players.map((player) => ({
       id: player.id,
@@ -181,22 +196,75 @@ export class DraftRepository {
   }
 
   /**
-   * The imagery/identity slice of the pool: `id`, `name`, `position`, `team`,
-   * `headshot_url`, `espn_id` — what the avatars need and nothing else. The
-   * full `fsnv2_players` read is ~575 kB of projections, stats and injury JSON
-   * for the same 740 rows, so the UI asks for the narrow one.
-   *
-   * Falls back to `fsnv2_players` when the project has not had migration
-   * `0006_fsnv2_player_headshots.sql` applied yet: that read returns whole rows,
-   * `headshot_url` included, and the transformer takes either shape.
+   * One week of provider projections. `scoringFormat` null returns every
+   * format the sync has stored; pass the league's to keep the numbers honest.
    */
-  async playerAssets(limit = 2000) {
+  projections({ season, week, scoringFormat = null, seasonType = 'reg', limit = 1000 } = {}) {
+    return this.rpc('fsnv2_projections', {
+      p_season: season,
+      p_week: week,
+      p_scoring_format: scoringFormat,
+      p_season_type: seasonType,
+      p_limit: limit
+    });
+  }
+
+  /** The real NFL slate. `week` null returns every synced week. */
+  nflSchedule({ season, week = null, seasonType = 'reg' } = {}) {
+    return this.rpc('fsnv2_nfl_schedule', {
+      p_season: season,
+      p_week: week,
+      p_season_type: seasonType
+    });
+  }
+
+  nflTeams() {
+    return this.rpc('fsnv2_nfl_teams', {});
+  }
+
+  /**
+   * Everything the UI needs from the sync, in one shot.
+   *
+   * All four RPCs are granted to `anon`, so the publishable key in config.js is
+   * enough — no service key ever reaches the browser. Resolves to null rather
+   * than throwing when Supabase is off or unreachable: the caller falls back to
+   * the static pool in playerData.js and the app carries on offline.
+   *
+   * Projections are fetched per week because the RPC takes one week at a time;
+   * the weeks actually synced are discovered from the schedule, so a season
+   * with only week 3 in the database costs exactly one projections call.
+   *
+   * @param {{season: number, weeks?: number[], scoringFormat?: string|null, limit?: number}} options
+   * @returns {Promise<{players: Array, projections: Array, schedule: Array}|null>}
+   */
+  async liveBundle({ season, weeks = null, scoringFormat = null, limit = 1000 } = {}) {
+    if (!this.enabled) return null;
+
     try {
-      return await this.rpc('fsnv2_player_assets', { p_limit: limit });
+      const [players, schedule] = await Promise.all([
+        this.players(limit),
+        this.nflSchedule({ season })
+      ]);
+
+      const scheduleRows = Array.isArray(schedule) ? schedule : [];
+      const syncedWeeks = weeks
+        ? weeks
+        : [...new Set(scheduleRows.map((game) => Number(game.week)).filter(Number.isFinite))];
+
+      const projectionPages = await Promise.all(
+        syncedWeeks.map((week) =>
+          this.projections({ season, week, scoringFormat, limit }).catch(() => [])
+        )
+      );
+
+      return {
+        players: Array.isArray(players) ? players : [],
+        schedule: scheduleRows,
+        projections: projectionPages.flatMap((page) => (Array.isArray(page) ? page : []))
+      };
     } catch (error) {
-      const missing = /PGRST202|Could not find the function|\(404\)/i.test(error.message || '');
-      if (!missing) throw error;
-      return this.players(limit);
+      this.setStatus('error', error.message);
+      return null;
     }
   }
 

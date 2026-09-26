@@ -7,6 +7,7 @@
  * rather than inside each mapper.
  */
 
+import { CANONICAL_TEAMS, canonicalTeam } from './teams.ts';
 import type { FantasyPosition, GameStatus, StatLine } from './types.ts';
 
 /** Tank01 (and most RapidAPI feeds) send every stat as a string. */
@@ -60,11 +61,86 @@ export function fantasyPosition(value: unknown): FantasyPosition | null {
   return POSITION_ALIASES[raw.toUpperCase()] ?? null;
 }
 
+/**
+ * Franchise abbreviations, canonicalised to the set the app renders with
+ * (js/nflTeams.js — the same 32 keys the logo chip, the team colours and the
+ * synthetic NFL slate are keyed on).
+ *
+ * Vendors disagree on a handful of them — Tank01 sends Washington as `WSH`,
+ * other feeds send `JAC` for Jacksonville or still carry a relocated team's old
+ * city — and an abbreviation the UI does not know renders as a grey chip with
+ * no logo and no opponent. Relocations collapse onto the current franchise:
+ * `OAK`/`SD`/`STL` are the same clubs as `LV`/`LAC`/`LAR`.
+ *
+ * The alias table itself now lives in ./teams.ts, which is the one place it is
+ * maintained: this module, the player audit and `fsnv2.canonical_team()` in
+ * migration 0007 all read from the same list, so a code added for one of them is
+ * added for all three. teams.ts also refuses anything numeric, which is what
+ * keeps a provider's internal team id out of a column that holds franchises.
+ */
+
+/** The 32 franchise codes everything downstream is keyed by. */
+export const NFL_TEAM_ABBRS = new Set(CANONICAL_TEAMS);
+
 /** Team abbreviations are compared and stored uppercase; free agents are 'FA'. */
 export function teamAbbr(value: unknown, fallback = 'FA'): string {
+  return canonicalTeam(value) ?? canonicalTeam(fallback) ?? fallback;
+}
+
+/**
+ * The same, but null for anything that is not one of the 32 franchises.
+ *
+ * Used wherever a value has to be a *team* and not merely a string: a game's
+ * two sides, a projection's `team`, a roster entry's affiliation. Writing an
+ * unrecognised code through means the row no longer joins to its game in
+ * fsnv2.nfl_matchups, and the player renders someone else's opponent.
+ */
+export function knownTeamAbbr(value: unknown): string | null {
+  return canonicalTeam(value);
+}
+
+/** Suffixes that a feed appends to a surname and another feed leaves off. */
+const NAME_SUFFIXES = new Set(['JR', 'SR', 'II', 'III', 'IV', 'V']);
+
+/**
+ * A player's name reduced to what two feeds can be expected to agree on:
+ * lowercase letters only, accents folded, punctuation and generational suffixes
+ * dropped.
+ *
+ *   'Deebo Samuel Sr.'  -> 'deebosamuel'
+ *   "Ja'Marr Chase"     -> 'jamarrchase'
+ *   'A.J. Brown'        -> 'ajbrown'
+ *   'Kenneth Walker III'-> 'kennethwalker'
+ *
+ * Suffix stripping is the part `fsnv2_player_match_key()` (migration 0006) does
+ * not do, and it is what the first reconciliation pass was missing: 42 of the
+ * 208 hand-maintained rows failed to match the roster feed purely on 'Sr.',
+ * which left their team assignments frozen at whatever they were seeded with.
+ */
+export function normalizePlayerName(value: unknown): string {
   const raw = text(value);
-  if (!raw) return fallback;
-  return raw.toUpperCase();
+  if (!raw) return '';
+  const words = raw
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+  while (words.length > 1 && NAME_SUFFIXES.has(words[words.length - 1])) words.pop();
+  return words.join('').toLowerCase();
+}
+
+/**
+ * The key a name+position match is made on. Position is part of it because two
+ * players do share a name (there are two Josh Allens), and a name collision
+ * across positions is the one case where a name-only match would be wrong.
+ */
+export function playerMatchKey(name: unknown, position: unknown): string {
+  const normalized = normalizePlayerName(name);
+  if (!normalized) return '';
+  const pos = fantasyPosition(position) ?? text(position)?.toUpperCase() ?? '';
+  return `${normalized}|${pos}`;
 }
 
 const GAME_STATUS_ALIASES: Array<[RegExp, GameStatus]> = [

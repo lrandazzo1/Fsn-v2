@@ -9,6 +9,7 @@
  * Dashboard / League / Team views in js/views/.
  */
 
+import { hasLiveSlate, normalizeAbbr, playerOpponentLabel, teamLogoHtml } from './nflTeams.js';
 import { POSITIONS, ROSTER_SLOTS } from './types.js';
 import { avatarSources } from './playerAssets.js';
 import { positionalScarcity } from './vorMath.js';
@@ -41,24 +42,26 @@ export function refreshIcons() {
 /* ------------------------------------------------------ player headshots --- */
 
 /**
- * Player Headshot Avatar — the component every player row renders instead of a
+ * Player Headshot Avatar — the component every player row renders in place of a
  * bare team badge. Three layers, so there is always something to look at:
  *
  *   1. initials chip in the team's colour, painted underneath
- *   2. the headshot itself (`player.headshotUrl`), falling back to the team logo
- *   3. a small team logo in the corner, kept as context rather than as the whole
- *      avatar — a D/ST skips it, since its "headshot" already *is* the logo
+ *   2. the headshot itself (`player.headshotUrl`), hopping to the team logo if
+ *      it 404s and removing itself if that fails too, back to layer 1
+ *   3. the team badge in the corner — `teamLogoHtml()`, the same helper the
+ *      rest of the app uses, so a club change still moves every badge at once.
+ *      A D/ST skips it: its "headshot" already *is* the team logo.
  *
  * @param {import('./types.js').Player|null} player
  * @param {{size?: 'xs'|'sm'|'md', team?: boolean, lazy?: boolean}} [options]
  */
 export function playerAvatar(player, { size = 'sm', team = true, lazy = true } = {}) {
   if (!player) return '';
-  const { src, fallback, initials, color, teamLogo } = avatarSources(player);
-  const label = `${player.name}${player.team ? ` · ${player.team}` : ''}`;
-  const corner = team && teamLogo;
+  const { src, fallback, initials, color, team: corner } = avatarSources(player);
+  const label = `${player.name}${player.team ? ` · ${normalizeAbbr(player.team)}` : ''}`;
+  const badgeAbbr = team ? corner : null;
 
-  return `<span class="player-avatar player-avatar--${size}${corner ? ' has-team' : ''}"
+  return `<span class="player-avatar player-avatar--${size}${badgeAbbr ? ' has-team' : ''}"
                 style="--team-color:${color}" title="${escapeHtml(label)}">
       <span class="player-avatar__initials" aria-hidden="true">${escapeHtml(initials)}</span>
       ${
@@ -69,10 +72,8 @@ export function playerAvatar(player, { size = 'sm', team = true, lazy = true } =
           : ''
       }
       ${
-        corner
-          ? `<span class="player-avatar__team" aria-hidden="true">
-               <img src="${escapeHtml(teamLogo)}" alt="" loading="lazy" decoding="async" data-on-error="remove" />
-             </span>`
+        badgeAbbr
+          ? `<span class="player-avatar__team" aria-hidden="true">${teamLogoHtml(badgeAbbr)}</span>`
           : ''
       }
     </span>`;
@@ -237,7 +238,7 @@ export function renderBoard(engine, ui) {
         cell.innerHTML = `
           <span class="board-cell__meta">${overall}.${pick.source === 'timer_expiry' ? ' ⏱' : pick.auto ? ' AUTO' : ''}</span>
           <span class="board-cell__name">${escapeHtml(shortName(player.name))}</span>
-          <span class="board-cell__pos">${player.position} · ${player.team}</span>`;
+          <span class="board-cell__pos">${player.position} · ${escapeHtml(normalizeAbbr(player.team))}</span>`;
       } else if (overall === engine.currentPick && !engine.complete) {
         cell.classList.add('is-onclock');
         cell.innerHTML = `
@@ -314,7 +315,7 @@ export function renderPool(engine, ui) {
       ${badge(player.position)}
       <span class="player-row__main">
         <span class="player-row__name">${escapeHtml(player.name)}</span>
-        <span class="player-row__meta">${player.team} · ${player.position}${player.posRank} · Tier ${player.tier} · ADP ${player.adp}</span>
+        <span class="player-row__meta">${escapeHtml(normalizeAbbr(player.team))} · ${player.position}${player.posRank} · Tier ${player.tier} · ADP ${player.adp}</span>
       </span>
       <span class="player-row__stats">
         <span class="player-row__vor ${player.vor >= 0 ? 'is-pos' : 'is-neg'}">${formatVor(player.vor)}</span>
@@ -371,7 +372,7 @@ export function renderRosterSelect(engine, ui) {
  * @param {HTMLElement} container
  * @param {'all'|'starters'|'bench'} scope
  */
-export function renderSlots(container, engine, teamId, scope = 'all') {
+export function renderSlots(container, engine, teamId, scope = 'all', week = null) {
   const roster = engine.rosterFor(teamId);
   const slots = ROSTER_SLOTS.filter((slot) =>
     scope === 'all' ? true : scope === 'starters' ? slot.starter : !slot.starter
@@ -383,6 +384,19 @@ export function renderSlots(container, engine, teamId, scope = 'all') {
     const player = playerId ? engine.playersById[playerId] : null;
     const row = document.createElement('div');
     row.className = `roster-slot${player ? '' : ' is-empty'}${slot.starter ? '' : ' is-bench'}`;
+
+    // The week's fixture, read off the sanitized payload (`player.opponent`,
+    // stamped by annotatePlayers) and falling back to a direct slate lookup.
+    // 'BYE' is dimmed because there is no game, '—' because the week has not
+    // been synced yet — neither is ever a made-up opponent.
+    const label = player && week ? playerOpponentLabel(player, week) : '';
+    const fixture =
+      player && week
+        ? `<span class="roster-slot__opp${
+            hasLiveSlate(week) && label !== 'BYE' ? '' : ' is-projected'
+          }">${escapeHtml(label)}</span>`
+        : '';
+
     row.innerHTML = `
       <span class="roster-slot__label">${slot.label}</span>
       ${
@@ -391,7 +405,8 @@ export function renderSlots(container, engine, teamId, scope = 'all') {
                ${playerAvatar(player, { size: 'xs' })}
                ${badge(player.position, true)}
                <span class="roster-slot__name">${escapeHtml(player.name)}</span>
-               <span class="roster-slot__team">${player.team}</span>
+               <span class="roster-slot__team">${escapeHtml(normalizeAbbr(player.team))}</span>
+               ${fixture}
              </span>
              <span class="roster-slot__pts">${player.projection}</span>`
           : '<span class="roster-slot__player roster-slot__player--empty">Empty</span><span class="roster-slot__pts">—</span>'
@@ -403,7 +418,7 @@ export function renderSlots(container, engine, teamId, scope = 'all') {
 
 export function renderRoster(engine, ui) {
   const teamId = ui.selectedTeamId;
-  renderSlots(dom.rosterSlots, engine, teamId, 'all');
+  renderSlots(dom.rosterSlots, engine, teamId, 'all', ui.week);
 
   const counts = engine.positionCounts(teamId);
   dom.rosterNeeds.innerHTML = `

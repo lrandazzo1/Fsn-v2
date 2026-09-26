@@ -12,7 +12,7 @@
  * read the same week.
  */
 
-import { opponentLabel } from '../nflTeams.js';
+import { annotatePlayers, hasLiveSlate, playerOpponentLabel } from '../nflTeams.js';
 import { badge, escapeHtml, playerAvatar, refreshIcons, renderTeamOptions } from '../uiRenderer.js';
 
 export function createMatchupView({ engine, season, ui, router, onSimulateWeek, onSimulateThrough, onResetSeason }) {
@@ -86,6 +86,13 @@ export function createMatchupView({ engine, season, ui, router, onSimulateWeek, 
     const mode = ui.matchupMode || 'mine';
     const played = season.isWeekPlayed(week);
 
+    // Re-stamp {player.team, player.opponent} whenever the week on screen
+    // moves, so every lineup row below reads the matchup for *this* week.
+    if (ui.nflWeek !== week) {
+      ui.nflWeek = week;
+      annotatePlayers(engine.playersById, week);
+    }
+
     el.title.textContent = `Week ${week}`;
     el.sub.textContent = `${season.weeks}-week season · ${season.matchupsForWeek(week).length} head-to-head games · ${
       played ? 'final' : 'not yet played'
@@ -151,8 +158,8 @@ export function createMatchupView({ engine, season, ui, router, onSimulateWeek, 
 
     const homeScore = season.displayTotal(week, home.id);
     const awayScore = season.displayTotal(week, away.id);
-    const homeProj = season.projectedTotal(home.id);
-    const awayProj = season.projectedTotal(away.id);
+    const homeProj = season.projectedTotal(home.id, week);
+    const awayProj = season.projectedTotal(away.id, week);
 
     // winProbabilityFor() reports the A side; flip it when A is on the right.
     const probA = season.winProbabilityFor(game);
@@ -254,7 +261,11 @@ export function createMatchupView({ engine, season, ui, router, onSimulateWeek, 
     const meta = `
       <span class="h2h__player-main">
         <span class="h2h__player-name">${escapeHtml(player.name)}</span>
-        <span class="h2h__player-meta">${player.position} · ${escapeHtml(opponentLabel(player.team, week))}</span>
+        <span class="h2h__player-meta${
+          hasLiveSlate(week) && !player.onBye ? '' : ' is-projected'
+        }">${player.position} · ${escapeHtml(player.team)} · ${escapeHtml(
+          playerOpponentLabel(player, week)
+        )}</span>
       </span>`;
     const pts = `<b class="${winning ? 'is-win' : ''}">${fmt(points)}</b>`;
     const face = playerAvatar(player, { size: 'md' });
@@ -267,9 +278,9 @@ export function createMatchupView({ engine, season, ui, router, onSimulateWeek, 
   /** Actual points once the week is final, the weekly projection until then. */
   function pointsFor(week, player, final) {
     if (!player) return 0;
-    if (!final) return season.weeklyProjection(player);
+    if (!final) return season.weeklyProjection(player, week);
     const scored = season.scoreFor(week, player.id);
-    return scored === null ? season.weeklyProjection(player) : scored;
+    return scored === null ? season.weeklyProjection(player, week) : scored;
   }
 
   /* -------------------------------------------------------- scoreboard -- */

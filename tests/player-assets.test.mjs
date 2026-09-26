@@ -2,26 +2,20 @@
  * Terminal test-suite for the player-imagery pipeline.
  *   node tests/player-assets.test.mjs
  *
- * Covers the three seams the headshots travel through: the row transform
- * (`headshot_url` -> `headshotUrl`, either spelling accepted), the merge onto the
- * draft pool (by id, then by name + position, and surviving a reset), and the
- * avatar markup with its fallback cascade.
+ * Three seams: the transform that carries `headshot_url` off a `fsnv2.players`
+ * row and onto the Player the UI renders, the avatar's fallback cascade, and
+ * the delegated `onError` handler that walks it.
  */
 
 import assert from 'node:assert/strict';
-import { DraftEngine } from '../js/draftEngine.js';
+import { buildLivePool } from '../js/liveData.js';
 import { loadPlayers } from '../js/playerData.js';
 import {
-  applyPlayerAssets,
   avatarInitials,
   avatarSources,
-  emptyPlayerAssets,
   espnHeadshotUrl,
-  headshotUrlFor,
-  indexPlayerAssets,
-  normalizeAssetRow,
-  playerMatchKey,
-  playerNameKey
+  espnIdFor,
+  headshotUrlFor
 } from '../js/playerAssets.js';
 import { installImageFallbacks, playerAvatar } from '../js/uiRenderer.js';
 
@@ -39,56 +33,73 @@ function test(name, fn) {
   }
 }
 
-/** A scheduler that never fires on its own. */
-const manualScheduler = { setInterval: () => 1, clearInterval: () => {} };
-
 const LAMAR_HEADSHOT = 'https://a.espncdn.com/combiner/i?img=/i/headshots/nfl/players/full/3916387.png';
 const BAL_LOGO = 'https://a.espncdn.com/i/teamlogos/nfl/500/bal.png';
 
-console.log('\n\u001b[1mFSN v2 — player assets\u001b[0m\n');
-
-/* ------------------------------------------------------ the row transform -- */
-
-test('normalizeAssetRow reads the database spelling', () => {
-  const asset = normalizeAssetRow({
-    id: 'p-0001',
-    name: 'Lamar Jackson',
-    position: 'qb',
-    team: 'bal',
-    headshot_url: LAMAR_HEADSHOT,
-    espn_id: '3916387'
-  });
-
-  assert.deepEqual(asset, {
+/** A `fsnv2_players` row, the shape PostgREST hands the browser. */
+function row(overrides = {}) {
+  return {
     id: 'p-0001',
     name: 'Lamar Jackson',
     position: 'QB',
     team: 'BAL',
-    headshotUrl: LAMAR_HEADSHOT,
-    espnId: '3916387'
-  });
+    stats: { projection: 380 },
+    headshot_url: LAMAR_HEADSHOT,
+    espn_id: '3916387',
+    ...overrides
+  };
+}
+
+console.log('\n\u001b[1mFSN v2 — player headshots\u001b[0m\n');
+
+/* ---------------------------------------------------------- the transform -- */
+
+test('buildLivePool carries headshot_url onto the Player', () => {
+  const [player] = buildLivePool([row()]);
+  assert.equal(player.headshotUrl, LAMAR_HEADSHOT);
+  assert.equal(player.espnId, '3916387');
 });
 
-test('normalizeAssetRow reads the camelCase spelling too', () => {
-  const asset = normalizeAssetRow({ id: 'x', name: 'A B', headshotUrl: LAMAR_HEADSHOT, espnId: '1' });
-  assert.equal(asset.headshotUrl, LAMAR_HEADSHOT);
-  assert.equal(asset.espnId, '1');
+test('buildLivePool derives the headshot from espn_id when the column is null', () => {
+  const [player] = buildLivePool([row({ headshot_url: null })]);
+  assert.equal(player.headshotUrl, LAMAR_HEADSHOT);
 });
 
-test('normalizeAssetRow derives the headshot from an espn id when the column is null', () => {
-  const asset = normalizeAssetRow({ id: 'p-0001', name: 'Lamar Jackson', headshot_url: null, espn_id: 3916387 });
-  assert.equal(asset.headshotUrl, LAMAR_HEADSHOT);
+test('buildLivePool leaves the imagery null rather than absent', () => {
+  const [player] = buildLivePool([row({ headshot_url: null, espn_id: null })]);
+  assert.equal(player.headshotUrl, null);
+  assert.equal(player.espnId, null);
+  assert.ok('headshotUrl' in player, 'the field is declared even when empty');
 });
 
-test('normalizeAssetRow refuses a non-http src', () => {
-  const asset = normalizeAssetRow({ id: 'p-0001', name: 'X', headshot_url: 'javascript:alert(1)' });
-  assert.equal(asset.headshotUrl, null);
+test('buildLivePool refuses a non-http src', () => {
+  const [player] = buildLivePool([row({ headshot_url: 'javascript:alert(1)', espn_id: null })]);
+  assert.equal(player.headshotUrl, null);
 });
 
-test('normalizeAssetRow treats empty and "null" strings as absent', () => {
-  const asset = normalizeAssetRow({ id: 'p-0001', name: 'X', headshot_url: '', espn_id: 'null' });
-  assert.equal(asset.headshotUrl, null);
-  assert.equal(asset.espnId, null);
+test('a D/ST row keeps the team logo the audit stored for it', () => {
+  const [player] = buildLivePool([
+    row({ id: 'p-0196', name: 'Ravens D/ST', position: 'DST', headshot_url: BAL_LOGO, espn_id: null })
+  ]);
+  assert.equal(player.headshotUrl, BAL_LOGO);
+});
+
+test('loadPlayers declares the imagery fields for the offline pool', () => {
+  const player = loadPlayers()[1];
+  assert.equal(player.name, 'Lamar Jackson');
+  assert.equal(player.headshotUrl, null);
+  assert.equal(player.espnId, null);
+});
+
+test('headshotUrlFor and espnIdFor read either spelling', () => {
+  assert.equal(headshotUrlFor({ headshot_url: LAMAR_HEADSHOT }), LAMAR_HEADSHOT);
+  assert.equal(headshotUrlFor({ headshotUrl: LAMAR_HEADSHOT }), LAMAR_HEADSHOT);
+  assert.equal(headshotUrlFor({ espn_id: '3916387' }), LAMAR_HEADSHOT);
+  assert.equal(headshotUrlFor({ espnId: 3916387 }), LAMAR_HEADSHOT);
+  assert.equal(headshotUrlFor({}), null);
+  assert.equal(headshotUrlFor(null), null);
+  assert.equal(espnIdFor({ espn_id: '3916387' }), '3916387');
+  assert.equal(espnIdFor({ espn_id: 'nope' }), null);
 });
 
 test('espnHeadshotUrl only trusts a numeric id', () => {
@@ -97,116 +108,13 @@ test('espnHeadshotUrl only trusts a numeric id', () => {
   assert.equal(espnHeadshotUrl(null), null);
 });
 
-test('playerNameKey mirrors public.fsnv2_player_key()', () => {
-  assert.equal(playerNameKey("Ja'Marr Chase"), 'jamarrchase');
-  assert.equal(playerNameKey('Brian Robinson Jr.'), 'brianrobinsonjr');
-  assert.equal(playerMatchKey('Lamar Jackson', 'qb'), 'lamarjackson|QB');
-  assert.equal(playerMatchKey('', 'QB'), null);
-});
-
-/* ------------------------------------------------------------- the index -- */
-
-test('indexPlayerAssets prefers the row that actually has a headshot', () => {
-  const index = indexPlayerAssets([
-    { id: 'p-0001', name: 'Lamar Jackson', position: 'QB', team: 'BAL', headshot_url: null },
-    { id: 'tank01-3916387', name: 'Lamar Jackson', position: 'QB', team: 'BAL', headshot_url: LAMAR_HEADSHOT }
-  ]);
-
-  assert.equal(index.byKey.get('lamarjackson|QB').headshotUrl, LAMAR_HEADSHOT);
-  assert.equal(index.byId.get('p-0001').headshotUrl, null);
-});
-
-test('indexPlayerAssets survives junk input', () => {
-  assert.equal(indexPlayerAssets(null).size, 0);
-  assert.equal(indexPlayerAssets([null, 42, {}, { name: '' }]).size, 0);
-});
-
-/* ------------------------------------------------------------- the merge -- */
-
-test('applyPlayerAssets matches on the pool id', () => {
-  const players = { 'p-0001': { id: 'p-0001', name: 'Lamar Jackson', position: 'QB', team: 'BAL', headshotUrl: null } };
-  const matched = applyPlayerAssets(
-    players,
-    indexPlayerAssets([{ id: 'p-0001', name: 'Lamar Jackson', position: 'QB', headshot_url: LAMAR_HEADSHOT }])
-  );
-
-  assert.equal(matched, 1);
-  assert.equal(players['p-0001'].headshotUrl, LAMAR_HEADSHOT);
-});
-
-test('applyPlayerAssets falls back to name + position for provider-keyed rows', () => {
-  const players = { 'p-0001': { id: 'p-0001', name: 'Lamar Jackson', position: 'QB', team: 'BAL', headshotUrl: null } };
-  const matched = applyPlayerAssets(
-    players,
-    indexPlayerAssets([
-      { id: 'tank01-3916387', name: 'Lamar Jackson', position: 'QB', headshot_url: LAMAR_HEADSHOT, espn_id: '3916387' }
-    ])
-  );
-
-  assert.equal(matched, 1);
-  assert.equal(players['p-0001'].headshotUrl, LAMAR_HEADSHOT);
-  assert.equal(players['p-0001'].espnId, '3916387');
-});
-
-test('applyPlayerAssets never blanks a headshot that is already on screen', () => {
-  const players = { 'p-0001': { id: 'p-0001', name: 'Lamar Jackson', position: 'QB', headshotUrl: LAMAR_HEADSHOT } };
-  const matched = applyPlayerAssets(
-    players,
-    indexPlayerAssets([{ id: 'p-0001', name: 'Lamar Jackson', position: 'QB', headshot_url: null }])
-  );
-
-  assert.equal(matched, 0);
-  assert.equal(players['p-0001'].headshotUrl, LAMAR_HEADSHOT);
-});
-
-test('a position change stops a name-only match', () => {
-  const players = { 'p-0001': { id: 'p-0001', name: 'Lamar Jackson', position: 'QB', headshotUrl: null } };
-  applyPlayerAssets(players, indexPlayerAssets([{ id: 'other', name: 'Lamar Jackson', position: 'WR', headshot_url: LAMAR_HEADSHOT }]));
-  assert.equal(players['p-0001'].headshotUrl, null);
-});
-
-/* ------------------------------------------------------------- the engine -- */
-
-test('loadPlayers declares the imagery fields', () => {
-  const player = loadPlayers()[1];
-  assert.equal(player.name, 'Lamar Jackson');
-  assert.equal(player.headshotUrl, null);
-  assert.equal(player.espnId, null);
-});
-
-test('setPlayerAssets merges into the live pool and reports the count', () => {
-  const engine = new DraftEngine({ scheduler: manualScheduler });
-  const matched = engine.setPlayerAssets(
-    indexPlayerAssets([{ id: 'p-0001', name: 'Lamar Jackson', position: 'QB', headshot_url: LAMAR_HEADSHOT }])
-  );
-
-  assert.equal(matched, 1);
-  assert.equal(engine.playersById['p-0001'].headshotUrl, LAMAR_HEADSHOT);
-});
-
-test('reset() rebuilds the pool without losing the headshots', () => {
-  const engine = new DraftEngine({ scheduler: manualScheduler });
-  engine.setPlayerAssets(
-    indexPlayerAssets([{ id: 'p-0001', name: 'Lamar Jackson', position: 'QB', headshot_url: LAMAR_HEADSHOT }])
-  );
-  engine.reset();
-
-  assert.equal(engine.playersById['p-0001'].headshotUrl, LAMAR_HEADSHOT);
-});
-
-test('setPlayerAssets(null) is a no-op, not a crash', () => {
-  const engine = new DraftEngine({ scheduler: manualScheduler });
-  assert.equal(engine.setPlayerAssets(null), 0);
-  assert.equal(engine.playerAssets.size, emptyPlayerAssets().size);
-});
-
 /* ------------------------------------------------------------- the avatar -- */
 
 test('avatarSources cascades headshot -> team logo', () => {
   const sources = avatarSources({ name: 'Lamar Jackson', position: 'QB', team: 'BAL', headshotUrl: LAMAR_HEADSHOT });
   assert.equal(sources.src, LAMAR_HEADSHOT);
   assert.equal(sources.fallback, BAL_LOGO);
-  assert.equal(sources.teamLogo, BAL_LOGO);
+  assert.equal(sources.team, 'BAL', 'the corner badge shows the club');
   assert.equal(sources.initials, 'LJ');
   assert.equal(sources.isHeadshot, true);
 });
@@ -215,22 +123,21 @@ test('avatarSources uses the team logo as the image when there is no headshot', 
   const sources = avatarSources({ name: 'Hollywood Brown', position: 'WR', team: 'PHI' });
   assert.equal(sources.src, 'https://a.espncdn.com/i/teamlogos/nfl/500/phi.png');
   assert.equal(sources.fallback, null, 'nothing left to hop to — the initials chip takes over');
-  assert.equal(sources.teamLogo, null, 'no corner logo on top of a logo');
+  assert.equal(sources.team, null, 'no corner badge on top of a logo');
   assert.equal(sources.initials, 'HB');
 });
 
-test('a D/ST keeps its logo and skips the corner overlay', () => {
-  const sources = avatarSources({ name: 'Ravens D/ST', position: 'DST', team: 'BAL', headshotUrl: BAL_LOGO });
-  assert.equal(sources.src, BAL_LOGO);
-  assert.equal(sources.teamLogo, null);
-  assert.equal(sources.initials, 'BAL');
+test('avatarSources normalises the abbreviation the badge keys on', () => {
+  const sources = avatarSources({ name: 'Terry McLaurin', position: 'WR', team: 'WSH', headshotUrl: LAMAR_HEADSHOT });
+  assert.equal(sources.team, 'WAS');
+  assert.equal(sources.fallback, 'https://a.espncdn.com/i/teamlogos/nfl/500/wsh.png');
 });
 
-test('headshotUrlFor reads a raw database row as happily as a Player', () => {
-  assert.equal(headshotUrlFor({ headshot_url: LAMAR_HEADSHOT }), LAMAR_HEADSHOT);
-  assert.equal(headshotUrlFor({ espn_id: '3916387' }), LAMAR_HEADSHOT);
-  assert.equal(headshotUrlFor({}), null);
-  assert.equal(headshotUrlFor(null), null);
+test('a D/ST keeps its logo and skips the corner badge', () => {
+  const sources = avatarSources({ name: 'Ravens D/ST', position: 'DST', team: 'BAL', headshotUrl: BAL_LOGO });
+  assert.equal(sources.src, BAL_LOGO);
+  assert.equal(sources.team, null);
+  assert.equal(sources.initials, 'BAL');
 });
 
 test('avatarInitials handles one-word and suffixed names', () => {
@@ -246,7 +153,7 @@ test('playerAvatar renders the img, the alt text and the fallback URL', () => {
   assert.match(html, /data-fallback="https:\/\/a\.espncdn\.com\/i\/teamlogos\/nfl\/500\/bal\.png"/);
   assert.match(html, /data-on-error="remove"/);
   assert.match(html, /player-avatar__initials[^>]*>LJ</);
-  assert.match(html, /player-avatar__team/);
+  assert.match(html, /player-avatar__team[\s\S]*class="team-logo"/, 'the corner reuses teamLogoHtml');
 });
 
 test('playerAvatar escapes the name it puts in an attribute', () => {
@@ -263,16 +170,17 @@ test('playerAvatar renders nothing for an empty slot', () => {
 
 /** A stand-in for an <img> that records what the handler did to it. */
 function fakeImage({ src, fallback }) {
-  return {
+  const img = {
     tagName: 'IMG',
     src,
     dataset: { onError: 'remove', ...(fallback ? { fallback } : {}) },
     classes: [],
     removed: false,
-    classList: { add(name) { this.owner.classes.push(name); } },
     getAttribute() { return this.src; },
     remove() { this.removed = true; }
   };
+  img.classList = { add: (name) => img.classes.push(name) };
+  return img;
 }
 
 /** Installs the delegated handler against a fake root and returns it. */
@@ -286,7 +194,6 @@ function captureHandler() {
 test('a failed headshot hops to the team logo', () => {
   const handler = captureHandler();
   const img = fakeImage({ src: LAMAR_HEADSHOT, fallback: BAL_LOGO });
-  img.classList.owner = img;
 
   handler({ target: img });
 
@@ -299,7 +206,6 @@ test('a failed headshot hops to the team logo', () => {
 test('a failed fallback removes the image and reveals the initials chip', () => {
   const handler = captureHandler();
   const img = fakeImage({ src: BAL_LOGO });
-  img.classList.owner = img;
 
   handler({ target: img });
 
