@@ -184,6 +184,17 @@ generated schedule is not a perfect matching (N offending team-weeks)
 
 ## Matchup & Scoreboard hub
 
+The regular-season week is resolved from the Thursday after Labor Day in UTC
+(`getCurrentNFLWeek()`); September 24–30, 2026 is Week 3. When sports data is
+enabled, the browser polls `/api/live-matchups?week=N` once a minute. This
+server-side route reads Tank01 game statuses and started games' box scores using
+`SPORTS_DATA_API_KEY` and `SPORTS_DATA_API_HOST`. The credentials never enter
+the browser. Results are cached for 60 seconds, and a failed refresh keeps the
+last successful snapshot. The server scores skill-player PPR stats locally;
+K/DST retain the provider's scoring rules. An active NFL player shows a LIVE
+badge, accumulated points and the weekly projection. Team actual totals count
+starters only. Simulated results remain separate from the live snapshot.
+
 `#/matchups` is the Phase 1 matchup panel grown into its own screen:
 
 - **Week selector** — weeks 1-14, marking which are final.

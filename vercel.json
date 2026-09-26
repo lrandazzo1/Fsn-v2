@@ -11,6 +11,9 @@
   "functions": {
     "api/sync.js": {
       "maxDuration": 60
+    },
+    "api/live-matchups.js": {
+      "maxDuration": 60
     }
   }
 }

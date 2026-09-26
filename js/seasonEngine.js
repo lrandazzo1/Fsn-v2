@@ -25,6 +25,7 @@
  */
 
 import { ROSTER_SLOTS } from './types.js';
+import { playerKey, teamAbbr } from './liveData.js';
 
 /** Weeks in the fantasy regular season. */
 export const SEASON_WEEKS = 14;
@@ -195,6 +196,8 @@ export class SeasonEngine {
      * @type {((player: Object, week: number) => number|null)|null}
      */
     this.liveProjections = null;
+    /** Live box scores are transient and never written into simulated results. */
+    this.liveMatchups = new Map();
 
     this.generate();
   }
@@ -320,11 +323,68 @@ export class SeasonEngine {
     return value === undefined ? null : value;
   }
 
+  /** Apply one authoritative snapshot, matching provider ids first and unique names second. */
+  setLiveMatchupStats(week, payload, playersById) {
+    const candidates = new Map();
+    for (const player of Object.values(playersById)) {
+      const key = player.position === 'DST' ? `DST|${teamAbbr(player.team)}` : playerKey(player.name);
+      const list = candidates.get(key) || [];
+      list.push(player);
+      candidates.set(key, list);
+    }
+    const games = new Map();
+    for (const game of payload.games || []) {
+      if (!['in_progress', 'final'].includes(game.status)) continue;
+      games.set(teamAbbr(game.home), game.status);
+      games.set(teamAbbr(game.away), game.status);
+    }
+    const scores = new Map();
+    const playerStatuses = new Map();
+    for (const row of payload.players || []) {
+      const key = row.position === 'DST' || String(row.id || '').includes('DST-')
+        ? `DST|${teamAbbr(row.team)}` : playerKey(row.name);
+      const hits = candidates.get(key) || [];
+      const player = playersById[row.id] || (hits.length === 1 ? hits[0] : null);
+      if (!player || !games.has(teamAbbr(row.team)) || !Number.isFinite(row.actualPoints)) continue;
+      scores.set(player.id, row.actualPoints);
+      playerStatuses.set(player.id, games.get(teamAbbr(row.team)));
+    }
+    this.liveMatchups.set(week, { games, scores, playerStatuses, receivedStats: Boolean(payload.players?.length) });
+    for (const player of Object.values(playersById)) {
+      player.actualPoints = this.livePointFor(week, player);
+      player.projectedPoints = this.weeklyProjection(player, week);
+      player.liveStatus = this.liveStatusFor(week, player);
+    }
+    this.emit('change', { reason: 'live_stats', week });
+  }
+
+  liveStatusFor(week, player) {
+    if (!player) return null;
+    const snapshot = this.liveMatchups.get(week);
+    return snapshot?.playerStatuses.get(player.id) ?? snapshot?.games.get(teamAbbr(player.team)) ?? null;
+  }
+
+  livePointFor(week, player) {
+    if (!player || !this.hasLiveScores(week) || !this.liveStatusFor(week, player)) return null;
+    return this.liveMatchups.get(week).scores.get(player.id) ?? 0;
+  }
+
+  hasLiveScores(week) {
+    const snapshot = this.liveMatchups.get(week);
+    return Boolean(snapshot?.games.size && snapshot.receivedStats);
+  }
+
+  actualTotal(week, teamId) {
+    return round2(this.lineup(teamId).reduce((total, { player }) =>
+      total + (this.livePointFor(week, player) ?? 0), 0));
+  }
+
   /**
    * The number to put on the scoreboard: the real total once the week is
    * final, the projection until then.
    */
   displayTotal(week, teamId) {
+    if (this.hasLiveScores(week)) return this.actualTotal(week, teamId);
     const game = this.matchupForTeam(week, teamId);
     if (game && game.status === 'final') {
       return game.teamAId === teamId ? game.teamAScore : game.teamBScore;
@@ -338,7 +398,7 @@ export class SeasonEngine {
    */
   winProbabilityFor(game) {
     if (!game) return 0.5;
-    if (game.status === 'final') {
+    if (game.status === 'final' && !this.hasLiveScores(game.week)) {
       if (game.teamAScore === game.teamBScore) return 0.5;
       return game.teamAScore > game.teamBScore ? 1 : 0;
     }

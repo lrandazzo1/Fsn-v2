@@ -11,6 +11,7 @@
  */
 
 import type { ScoringFormat, SeasonType } from './types.ts';
+import { getCurrentNFLWeek, nflSeasonKickoff } from '../../js/nflWeek.js';
 
 export type EnvSource = Record<string, string | undefined>;
 
@@ -95,9 +96,7 @@ export function currentSeason(now: Date = new Date()): number {
  * configurable.
  */
 export function seasonKickoff(season: number): Date {
-  const september = new Date(Date.UTC(season, 8, 1));
-  const firstMonday = 1 + ((8 - september.getUTCDay()) % 7);
-  return new Date(Date.UTC(season, 8, firstMonday + 3));
+  return nflSeasonKickoff(season);
 }
 
 /**
@@ -105,10 +104,7 @@ export function seasonKickoff(season: number): Date {
  * Before the season opens it reads as week 1; after week 18 it stays at 18.
  */
 export function currentNflWeek(now: Date = new Date(), season?: number): number {
-  const kickoff = seasonKickoff(season ?? currentSeason(now));
-  const days = Math.floor((now.getTime() - kickoff.getTime()) / 86400000);
-  if (days < 0) return 1;
-  return Math.min(18, Math.floor(days / 7) + 1);
+  return getCurrentNFLWeek(now, season ?? currentSeason(now));
 }
 
 export interface WeekFocus {

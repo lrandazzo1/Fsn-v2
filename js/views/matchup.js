@@ -84,7 +84,7 @@ export function createMatchupView({ engine, season, ui, router, onSimulateWeek, 
   function render() {
     const week = ui.week || 1;
     const mode = ui.matchupMode || 'mine';
-    const played = season.isWeekPlayed(week);
+    const played = season.isWeekPlayed(week) && !season.hasLiveScores(week);
 
     // Re-stamp {player.team, player.opponent} whenever the week on screen
     // moves, so every lineup row below reads the matchup for *this* week.
@@ -114,8 +114,8 @@ export function createMatchupView({ engine, season, ui, router, onSimulateWeek, 
     if (mode === 'mine') renderMyMatchup(week);
     else renderScoreboard(week);
 
-    el.btnSimWeek.disabled = played;
-    el.btnSimWeek.innerHTML = played
+    el.btnSimWeek.disabled = season.isWeekPlayed(week);
+    el.btnSimWeek.innerHTML = season.isWeekPlayed(week)
       ? '<i data-lucide="check-circle-2"></i> Week Final'
       : `<i data-lucide="dices"></i> Simulate Week ${week}`;
     el.btnSimSeason.innerHTML = `<i data-lucide="fast-forward"></i> Sim Through ${week}`;
@@ -127,7 +127,7 @@ export function createMatchupView({ engine, season, ui, router, onSimulateWeek, 
   function renderWeekBar(current) {
     el.weeks.innerHTML = season.weekNumbers
       .map((week) => {
-        const played = season.isWeekPlayed(week);
+        const played = season.isWeekPlayed(week) && !season.hasLiveScores(week);
         return `
           <button class="week-chip${week === current ? ' is-active' : ''}${played ? ' is-final' : ''}"
                   data-week="${week}" title="Week ${week}${played ? ' — final' : ''}">
@@ -154,7 +154,8 @@ export function createMatchupView({ engine, season, ui, router, onSimulateWeek, 
     const flipped = game.teamBId === teamId;
     const home = engine.teamById(flipped ? game.teamBId : game.teamAId);
     const away = engine.teamById(flipped ? game.teamAId : game.teamBId);
-    const final = game.status === 'final';
+    const final = game.status === 'final' && !season.hasLiveScores(week);
+    const live = !final && season.hasLiveScores(week);
 
     const homeScore = season.displayTotal(week, home.id);
     const awayScore = season.displayTotal(week, away.id);
@@ -165,7 +166,7 @@ export function createMatchupView({ engine, season, ui, router, onSimulateWeek, 
     const probA = season.winProbabilityFor(game);
     const homeWinPct = Math.round((flipped ? 1 - probA : probA) * 100);
 
-    el.statusChip.textContent = final ? 'Final' : 'Projected';
+    el.statusChip.textContent = final ? 'Final' : live ? 'Live scores' : 'Projected';
 
     el.my.innerHTML = `
       <div class="h2h">
@@ -178,7 +179,7 @@ export function createMatchupView({ engine, season, ui, router, onSimulateWeek, 
 
           <div class="h2h__scores">
             <span class="h2h__score ${final && homeScore > awayScore ? 'is-winner' : ''}">${fmt(homeScore)}</span>
-            <span class="h2h__dash">${final ? 'FINAL' : 'PROJ'}</span>
+            <span class="h2h__dash">${final ? 'FINAL' : live ? 'ACTUAL' : 'PROJ'}</span>
             <span class="h2h__score ${final && awayScore > homeScore ? 'is-winner' : ''}">${fmt(awayScore)}</span>
           </div>
 
@@ -207,11 +208,11 @@ export function createMatchupView({ engine, season, ui, router, onSimulateWeek, 
         <div class="h2h__grid">
           <div class="h2h__col-head">
             <span>${escapeHtml(home.abbr)} starters</span>
-            <span class="h2h__col-pts">${final ? 'PTS' : 'PROJ'}</span>
+            <span class="h2h__col-pts">${final || live ? 'PTS / PROJ' : 'PROJ'}</span>
           </div>
           <span class="h2h__col-slot">SLOT</span>
           <div class="h2h__col-head is-right">
-            <span class="h2h__col-pts">${final ? 'PTS' : 'PROJ'}</span>
+            <span class="h2h__col-pts">${final || live ? 'PTS / PROJ' : 'PROJ'}</span>
             <span>${escapeHtml(away.abbr)} starters</span>
           </div>
           ${renderLineupRows(week, home.id, away.id, final)}
@@ -258,16 +259,20 @@ export function createMatchupView({ engine, season, ui, router, onSimulateWeek, 
       return `<span class="h2h__player is-empty">${right ? '' : '<em>Empty</em>'}<b>—</b>${right ? '<em>Empty</em>' : ''}</span>`;
     }
 
+    const status = season.liveStatusFor(week, player);
     const meta = `
       <span class="h2h__player-main">
-        <span class="h2h__player-name">${escapeHtml(player.name)}</span>
+        <span class="h2h__player-name">${escapeHtml(player.name)}${status === 'in_progress' ? ' <em class="live-badge">LIVE</em>' : ''}</span>
         <span class="h2h__player-meta${
           hasLiveSlate(week) && !player.onBye ? '' : ' is-projected'
         }">${player.position} · ${escapeHtml(player.team)} · ${escapeHtml(
           playerOpponentLabel(player, week)
         )}</span>
       </span>`;
-    const pts = `<b class="${winning ? 'is-win' : ''}">${fmt(points)}</b>`;
+    const actual = season.hasLiveScores(week) ? season.livePointFor(week, player)
+      : season.isWeekPlayed(week) ? season.scoreFor(week, player.id) : null;
+    const projection = season.weeklyProjection(player, week);
+    const pts = `<span class="h2h__points"><b class="${winning ? 'is-win' : ''}">${fmt(points)}</b>${actual !== null || season.hasLiveScores(week) ? `<small>Proj ${fmt(projection)}</small>` : ''}</span>`;
     const face = playerAvatar(player, { size: 'md' });
 
     return `<span class="h2h__player${winning ? ' is-win' : ''}">${
@@ -278,7 +283,7 @@ export function createMatchupView({ engine, season, ui, router, onSimulateWeek, 
   /** Actual points once the week is final, the weekly projection until then. */
   function pointsFor(week, player, final) {
     if (!player) return 0;
-    if (!final) return season.weeklyProjection(player, week);
+    if (!final) return season.livePointFor(week, player) ?? (season.hasLiveScores(week) ? 0 : season.weeklyProjection(player, week));
     const scored = season.scoreFor(week, player.id);
     return scored === null ? season.weeklyProjection(player, week) : scored;
   }
@@ -288,13 +293,13 @@ export function createMatchupView({ engine, season, ui, router, onSimulateWeek, 
   function renderScoreboard(week) {
     const games = season.matchupsForWeek(week);
     const played = season.isWeekPlayed(week);
-    el.boardChip.textContent = `${games.length} games · ${played ? 'final' : 'projected'}`;
+    el.boardChip.textContent = `${games.length} games · ${played ? 'final' : season.hasLiveScores(week) ? 'live scores' : 'projected'}`;
 
     el.board.innerHTML = games
       .map((game) => {
         const a = engine.teamById(game.teamAId);
         const b = engine.teamById(game.teamBId);
-        const final = game.status === 'final';
+        const final = game.status === 'final' && !season.hasLiveScores(week);
         const scoreA = season.displayTotal(week, a.id);
         const scoreB = season.displayTotal(week, b.id);
         const pctA = Math.round(season.winProbabilityFor(game) * 100);
@@ -303,12 +308,12 @@ export function createMatchupView({ engine, season, ui, router, onSimulateWeek, 
           <article class="game-card${a.isUser || b.isUser ? ' is-user' : ''}"
                    data-team-a="${a.id}" title="Open ${escapeHtml(a.name)} vs ${escapeHtml(b.name)}">
             <header class="game-card__head">
-              <span class="game-card__status ${final ? 'is-final' : ''}">${final ? 'FINAL' : 'PROJ'}</span>
+              <span class="game-card__status ${final ? 'is-final' : season.hasLiveScores(week) ? 'is-live' : ''}">${final ? 'FINAL' : season.hasLiveScores(week) ? 'ACTUAL' : 'PROJ'}</span>
               <span class="game-card__week">Week ${week}</span>
             </header>
 
-            ${scoreboardSide(a, scoreA, final && scoreA > scoreB, season.recordLabel(a.id))}
-            ${scoreboardSide(b, scoreB, final && scoreB > scoreA, season.recordLabel(b.id))}
+            ${scoreboardSide(a, scoreA, final && scoreA > scoreB, season.recordLabel(a.id), week, final)}
+            ${scoreboardSide(b, scoreB, final && scoreB > scoreA, season.recordLabel(b.id), week, final)}
 
             <div class="game-card__bar" title="${pctA}% ${escapeHtml(a.abbr)}">
               <span style="width:${pctA}%"></span>
@@ -318,7 +323,7 @@ export function createMatchupView({ engine, season, ui, router, onSimulateWeek, 
       .join('');
   }
 
-  function scoreboardSide(team, score, winner, record) {
+  function scoreboardSide(team, score, winner, record, week, final) {
     return `
       <div class="game-card__side${winner ? ' is-winner' : ''}">
         <span class="game-card__abbr">${escapeHtml(team.abbr)}</span>
@@ -326,7 +331,8 @@ export function createMatchupView({ engine, season, ui, router, onSimulateWeek, 
           ${escapeHtml(team.name)}${team.isUser ? ' <em>(You)</em>' : ''}
           <span class="game-card__record">${escapeHtml(record)}</span>
         </span>
-        <span class="game-card__score">${fmt(score)}</span>
+        <span class="game-card__score">${fmt(score)}${!final && season.hasLiveScores(week)
+          ? `<small>Proj ${fmt(season.projectedTotal(team.id, week))}</small>` : ''}</span>
       </div>`;
   }
 
