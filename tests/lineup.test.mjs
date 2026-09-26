@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { canSwap, createLineup, swapRoster, validLineup } from '../js/lineup.js';
 import { DraftEngine } from '../js/draftEngine.js';
 import { SeasonEngine } from '../js/seasonEngine.js';
+import swapHandler from '../api/roster/swap.js';
 
 const engine = new DraftEngine();
 engine.autoDraftUser = true;
@@ -80,4 +81,40 @@ await new Promise((resolve) => setImmediate(resolve));
 assert.deepEqual(engine.rosterFor(teamId), expected);
 assert.match(events.at(-1), /conflict/);
 
-console.log('Lineup eligibility, optimistic swap, rollback, final-week snapshot, and starter VOR passed.');
+const previousUrl = process.env.SUPABASE_URL;
+const previousKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const previousFetch = global.fetch;
+process.env.SUPABASE_URL = 'https://example.supabase.co';
+process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-server-key';
+let requestBody;
+global.fetch = async (url, options) => {
+  assert.match(url, /\/rest\/v1\/rpc\/fsnv2_swap_lineup$/);
+  assert.equal(options.headers.Authorization, 'Bearer test-server-key');
+  requestBody = JSON.parse(options.body);
+  return { ok: true, json: async () => ({ roster: expected, version: 2 }) };
+};
+const res = {
+  status(code) { this.statusCode = code; return this; },
+  setHeader() { return this; },
+  json(body) { this.body = body; }
+};
+const draftId = '12345678-1234-1234-1234-123456789abc';
+await swapHandler({ method: 'POST', body: {
+  draftId, teamId, from: 'WR1', to: 'WR2',
+  fromPlayerId: expected.WR1, toPlayerId: expected.WR2, expectedVersion: 1
+} }, res);
+assert.equal(res.statusCode, 200);
+assert.equal(requestBody.p_expected_version, 1);
+assert.equal(requestBody.p_team_id, teamId);
+await swapHandler({ method: 'POST', body: {
+  draftId, teamId, from: 'QB', to: 'WR1', fromPlayerId: expected.QB,
+  toPlayerId: expected.WR1, expectedVersion: -1
+} }, res);
+assert.equal(res.statusCode, 400);
+global.fetch = previousFetch;
+if (previousUrl === undefined) delete process.env.SUPABASE_URL;
+else process.env.SUPABASE_URL = previousUrl;
+if (previousKey === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+else process.env.SUPABASE_SERVICE_ROLE_KEY = previousKey;
+
+console.log('Lineup eligibility, optimistic swap, rollback, API routing, final-week snapshot, and starter VOR passed.');

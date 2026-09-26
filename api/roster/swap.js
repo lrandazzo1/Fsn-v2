@@ -26,7 +26,8 @@ export default async function handler(req, res) {
   }
 
   const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_PUBLISHABLE_KEY;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY ||
+    process.env.SUPABASE_PUBLISHABLE_KEY;
   if (!url || !key) return send(res, 503, { error: 'Lineup storage is unavailable.' });
   const name = req.method === 'POST' ? 'fsnv2_swap_lineup' : 'fsnv2_lineup_state';
   const args = { p_draft_id: draftId, p_team_id: Number(teamId) };
