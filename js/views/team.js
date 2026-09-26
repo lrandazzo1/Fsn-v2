@@ -11,6 +11,7 @@
 import { annotatePlayers, playerOpponentLabel } from '../nflTeams.js';
 import { ROSTER_SLOTS } from '../types.js';
 import { inactiveBadge } from '../statsEngine.js';
+import { createLineup } from '../lineup.js';
 import {
   badge,
   escapeHtml,
@@ -19,10 +20,11 @@ import {
   playerAvatar,
   refreshIcons,
   renderSlots,
-  renderTeamOptions
+  renderTeamOptions,
+  toast
 } from '../uiRenderer.js';
 
-export function createTeamView({ engine, season, ui, router, onWeekChange = () => {} }) {
+export function createTeamView({ engine, season, ui, router, persistLineup, onWeekChange = () => {} }) {
   const el = {
     name: document.getElementById('teamName'),
     sub: document.getElementById('teamSub'),
@@ -38,6 +40,26 @@ export function createTeamView({ engine, season, ui, router, onWeekChange = () =
   };
 
   let teamId = engine.userTeamId;
+  const lineup = createLineup({
+    engine, teamId: engine.userTeamId, persist: persistLineup,
+    notify: toast,
+    onChange: (invalidSlot) => {
+      render();
+      if (invalidSlot) {
+        const row = el.starters.querySelector(`[data-slot="${invalidSlot}"]`) ||
+          el.bench.querySelector(`[data-slot="${invalidSlot}"]`);
+        row?.classList.add('is-invalid');
+        row?.addEventListener('animationend', () => row.classList.remove('is-invalid'), { once: true });
+      }
+    }
+  });
+
+  function onRosterClick(event) {
+    const row = event.target.closest('[data-slot]');
+    if (row) lineup.select(row.dataset.slot);
+  }
+  el.starters.addEventListener('click', onRosterClick);
+  el.bench.addEventListener('click', onRosterClick);
 
   el.select.addEventListener('change', (event) => {
     router.go(`/team/${event.target.value}`);
@@ -52,6 +74,7 @@ export function createTeamView({ engine, season, ui, router, onWeekChange = () =
   function enter(params = {}) {
     const requested = Number(params.id);
     teamId = Number.isFinite(requested) && engine.teamById(requested) ? requested : engine.userTeamId;
+    lineup.clear();
     render();
   }
 
@@ -78,12 +101,12 @@ export function createTeamView({ engine, season, ui, router, onWeekChange = () =
       tile('trophy', 'Record', season.recordLabel(teamId), `#${rank} in the league`),
       tile('flame', 'Points For', record ? record.pointsFor.toFixed(1) : '0.0', `${record?.games ?? 0} games played`),
       tile('shield-half', 'Points Against', record ? record.pointsAgainst.toFixed(1) : '0.0', `streak ${record?.streak ?? '—'}`),
-      tile('gauge', 'Total VOR', formatVor(engine.teamVor(teamId)), `${team.roster.length}/${engine.rounds} rostered · ${filled}/${starterCount} starters`)
+      tile('gauge', 'Total VOR', formatVor(engine.starterVor(teamId)), `${team.roster.length}/${engine.rounds} rostered · ${filled}/${starterCount} starters`)
     ].join('');
 
     el.starterChip.textContent = `${filled}/${starterCount} filled`;
-    renderSlots(el.starters, engine, teamId, 'starters', week);
-    renderSlots(el.bench, engine, teamId, 'bench', week);
+    renderSlots(el.starters, engine, teamId, 'starters', week, team.isUser ? lineup : null);
+    renderSlots(el.bench, engine, teamId, 'bench', week, team.isUser ? lineup : null);
 
     renderMatchup(team, week);
 
@@ -150,8 +173,8 @@ export function createTeamView({ engine, season, ui, router, onWeekChange = () =
       <div class="matchup__slots">
         ${ROSTER_SLOTS.filter((slot) => slot.starter)
           .map((slot) => {
-            const me = playerIn(team.id, slot.key);
-            const them = playerIn(opponentId, slot.key);
+            const me = playerIn(team.id, slot.key, final ? week : null);
+            const them = playerIn(opponentId, slot.key, final ? week : null);
             const minePts = slotPoints(week, me, final);
             const themPts = slotPoints(week, them, final);
             return `
@@ -192,12 +215,11 @@ export function createTeamView({ engine, season, ui, router, onWeekChange = () =
     return scored === null ? 0 : scored;
   }
 
-  function playerIn(id, slotKey) {
-    const playerId = engine.rosterFor(id)[slotKey];
-    return playerId ? engine.playersById[playerId] : null;
+  function playerIn(id, slotKey, week) {
+    return season.lineup(id, week).find((entry) => entry.slot.key === slotKey)?.player ?? null;
   }
 
-  return { name: 'team', enter, render };
+  return { name: 'team', enter, render, lineup };
 }
 
 /** Weeks 1-14 in the Team page's own selector, kept in step with ui.week. */

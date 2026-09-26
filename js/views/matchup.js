@@ -237,8 +237,8 @@ export function createMatchupView({ engine, season, ui, router, onSimulateWeek, 
 
   /** One row per starter slot, so QB always faces QB. */
   function renderLineupRows(week, homeId, awayId, final) {
-    const homeLineup = season.lineup(homeId);
-    const awayLineup = season.lineup(awayId);
+    const homeLineup = season.lineup(homeId, final ? week : null);
+    const awayLineup = season.lineup(awayId, final ? week : null);
 
     return homeLineup
       .map((entry, index) => {

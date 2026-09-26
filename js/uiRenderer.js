@@ -368,7 +368,7 @@ export function renderRosterSelect(engine, ui) {
  * @param {HTMLElement} container
  * @param {'all'|'starters'|'bench'} scope
  */
-export function renderSlots(container, engine, teamId, scope = 'all', week = null) {
+export function renderSlots(container, engine, teamId, scope = 'all', week = null, lineup = null) {
   const roster = engine.rosterFor(teamId);
   const slots = ROSTER_SLOTS.filter((slot) =>
     scope === 'all' ? true : scope === 'starters' ? slot.starter : !slot.starter
@@ -380,7 +380,6 @@ export function renderSlots(container, engine, teamId, scope = 'all', week = nul
     const player = playerId ? engine.playersById[playerId] : null;
     const row = document.createElement('div');
     row.className = `roster-slot${player ? '' : ' is-empty'}${slot.starter ? '' : ' is-bench'}`;
-
     // The week's fixture, read off the sanitized payload (`player.opponent`,
     // stamped by annotatePlayers) and falling back to a direct slate lookup.
     // 'BYE' is dimmed because there is no game, '—' because the week has not
@@ -392,7 +391,16 @@ export function renderSlots(container, engine, teamId, scope = 'all', week = nul
             hasLiveSlate(week) && label !== 'BYE' ? '' : ' is-projected'
           }">${escapeHtml(label)}</span>`
         : '';
-
+    if (lineup) {
+      row.classList.add('roster-slot--interactive');
+      if (lineup.selectedSlot === slot.key) row.classList.add('is-selected');
+      else if (lineup.validTarget(slot.key)) row.classList.add('is-target');
+      row.dataset.slot = slot.key;
+      row.setAttribute('role', 'button');
+      row.setAttribute('tabindex', lineup.pending ? '-1' : '0');
+      row.setAttribute('aria-label', `${lineup.selectedSlot ? 'Swap with' : 'Select'} ${player ? player.name : 'empty'} ${slot.label} slot`);
+      row.setAttribute('aria-pressed', String(lineup.selectedSlot === slot.key));
+    }
     row.innerHTML = `
       <span class="roster-slot__label">${slot.label}</span>
       ${
@@ -407,6 +415,12 @@ export function renderSlots(container, engine, teamId, scope = 'all', week = nul
              <span class="roster-slot__pts">${player.projection}</span>`
           : '<span class="roster-slot__player roster-slot__player--empty">Empty</span><span class="roster-slot__pts">—</span>'
       }`;
+    if (lineup) row.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        lineup.select(slot.key);
+      }
+    });
     frag.appendChild(row);
   });
   container.replaceChildren(frag);
