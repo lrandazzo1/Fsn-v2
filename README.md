@@ -70,7 +70,8 @@ scripts/audit-players.ts   Player audit CLI (npm run audit:players)
 scripts/test-audit-players.ts  Audit verification CLI (npm run test:audit)
 supabase/migrations/    Schema + RPC migrations (0004 adds the sync tables, 0005 the derivations,
                         0006 the team refresh, 0007 player identity + headshots,
-                        0008 the saved lineup + swap RPC)
+                        0008 the saved lineup + swap RPC, 0009-0012 the audit
+                        counters, the upsert/sync merge and the assets RPC)
 tests/engine.test.mjs   41 assertions: snake order, clock expiry, rosters, hydration
 tests/season.test.mjs   51 assertions: schedule, simulation, standings, NFL matchups, hydration
 tests/player-assets.test.mjs  19 assertions: headshot transform, avatar markup, onError cascade
@@ -325,7 +326,7 @@ Applied to the Supabase project **FSN** as `fsnv2_draft_engine_schema`,
 tables and RPCs — apply it before the first sync run. Tables live in a dedicated `fsnv2` schema so they
 never collide with the existing `public.*` tables.
 
-**Apply them in order, all eight.** `0006_fsnv2_player_team_refresh.sql` is not
+**Apply them in order, all twelve.** `0006_fsnv2_player_team_refresh.sql` is not
 optional: without it `fsnv2_upsert_players` still carries its original 0002
 body, and the browser overwrites every synced roster on each page load (see
 [Team affiliations](#team-affiliations) below).
@@ -338,9 +339,23 @@ callable as soon as it is applied. Every
 migration is idempotent, so re-applying one on a project that already has it is
 a no-op.
 
+`0009`-`0012` were applied straight to the project and backfilled here
+afterwards, byte for byte as the database recorded them, so the folder and the
+project now list the same migrations. `0009` corrects the counters
+`fsnv2_apply_player_audit` returns (it reported `updated: 0` while writing the
+rows correctly), `0010` reconciles the `fsnv2_upsert_players` /
+`fsnv2_sync_players` bodies that `0006` and `0007` took turns overwriting, and
+`0011`/`0012` add and then drop `public.fsnv2_player_assets` — the narrow
+imagery read the UI never used, kept as a pair so the history reads the same
+way the project's does. On a fresh project their column and index statements
+are no-ops on top of `0007`. They ran before `0008` on the FSN project and are
+numbered after it; nothing in either touches the other's objects, so the
+numeric order and the applied order end in the same schema.
+
 ```bash
-# in order — 0006 replaces the 0002 definition of fsnv2_upsert_players
-for f in supabase/migrations/000*.sql; do psql "$DATABASE_URL" -f "$f"; done
+# in order — 0006 replaces the 0002 definition of fsnv2_upsert_players,
+# 0010 replaces what 0006 and 0007 both wrote
+for f in supabase/migrations/0*.sql; do psql "$DATABASE_URL" -f "$f"; done
 ```
 
 | Table | Columns |
@@ -636,9 +651,10 @@ run in order and stop starting new work near the function's time limit, reportin
 | `CRON_SECRET` | Vercel Cron sends it as `Authorization: Bearer $CRON_SECRET`; the route requires it once set, and warns in its response while it is missing |
 | `SUPABASE_URL` | optional — defaults to the project in `js/config.js` |
 
-Migrations `0003`, `0004`, `0005` and `0006` must be applied to the Supabase
-project before the first run, or every write fails with `Could not find the
-function public.fsnv2_sync_players`.
+Migrations `0003` through `0006`, and `0010` — which is the last one to
+redefine `fsnv2_sync_players` — must be applied to the Supabase project before
+the first run, or every write fails with `Could not find the function
+public.fsnv2_sync_players`.
 
 ### Mapping
 
