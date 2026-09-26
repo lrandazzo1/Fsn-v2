@@ -31,6 +31,7 @@ import {
 } from './types.js';
 import { draftValue, enrichPlayers, recommendPlayers } from './vorMath.js';
 import { loadPlayers } from './playerData.js';
+import { applyPlayerAssets, emptyPlayerAssets } from './playerAssets.js';
 import { PickTimer } from './draftTimer.js';
 
 /* ---------------------------------------------------------------------------
@@ -103,6 +104,13 @@ export class DraftEngine {
     /** @type {Map<string, Function[]>} */
     this.listeners = new Map();
 
+    /**
+     * Headshots and external ids, keyed for lookup. Held on the engine rather
+     * than in a view because `reset()` rebuilds the pool from playerData.js —
+     * whatever the database told us has to survive that.
+     */
+    this.playerAssets = emptyPlayerAssets();
+
     this.clock = new PickTimer({
       seconds: this.config.timerSeconds,
       scheduler: this.config.scheduler,
@@ -129,6 +137,7 @@ export class DraftEngine {
     pool.forEach((player) => {
       this.playersById[player.id] = player;
     });
+    applyPlayerAssets(this.playersById, this.playerAssets);
 
     this.teams = Array.from({ length: teamCount }, (_, index) => {
       const id = index + 1;
@@ -150,6 +159,21 @@ export class DraftEngine {
 
     if (!silent) this.emit('change', { reason: 'reset' });
     if (this.config.autoStartClock && !silent) this.startClock();
+  }
+
+  /**
+   * Merges the database's player imagery into the pool and keeps the index so
+   * `reset()` can re-apply it. Emits `change` so every open view repaints with
+   * the headshots the moment the read lands.
+   *
+   * @param {ReturnType<import('./playerAssets.js').indexPlayerAssets>} index
+   * @returns {number} how many players gained a headshot
+   */
+  setPlayerAssets(index) {
+    this.playerAssets = index || emptyPlayerAssets();
+    const matched = applyPlayerAssets(this.playersById, this.playerAssets);
+    if (matched > 0) this.emit('change', { reason: 'assets', matched });
+    return matched;
   }
 
   // ------------------------------------------------------------------ getters

@@ -235,6 +235,12 @@ export const RAW_PLAYERS = [
 /**
  * Normalises the tuple rows into Player-shaped objects with stable ids.
  * VOR fields are left at their defaults — `vorMath.enrichPlayers()` fills them.
+ *
+ * `headshotUrl` / `espnId` are declared here and left null: the tuples carry no
+ * imagery, and `js/playerAssets.js` merges it in from `fsnv2.players` once the
+ * pool read lands. Declaring them keeps every Player the same shape, so a view
+ * can read `player.headshotUrl` without knowing whether the fetch has returned.
+ *
  * @returns {import('./types.js').Player[]}
  */
 export function loadPlayers() {
@@ -249,6 +255,8 @@ export function loadPlayers() {
     posRank: 0,
     tier: 1,
     adp: 0,
+    headshotUrl: null,
+    espnId: null,
     draftedBy: null,
     pickNumber: null
   }));

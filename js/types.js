@@ -22,6 +22,8 @@
  * @property {number}   posRank       Rank within position (1 = best).
  * @property {number}   tier          Tier bucket within position (1 = elite).
  * @property {number}   adp           Derived average draft position.
+ * @property {string|null} headshotUrl Player headshot (fsnv2.players.headshot_url).
+ * @property {string|null} espnId      ESPN player id, when the audit resolved one.
  * @property {number|null} draftedBy  Team id that rostered the player, or null.
  * @property {number|null} pickNumber Overall pick number used, or null.
  */
@@ -132,6 +134,10 @@ export function createPlayer(input) {
     posRank: input.posRank ?? 0,
     tier: input.tier ?? 1,
     adp: input.adp ?? 0,
+    // Imagery is merged in from the database (js/playerAssets.js) — the local
+    // pool has none, so the fields exist and start null rather than missing.
+    headshotUrl: input.headshotUrl ?? null,
+    espnId: input.espnId ?? null,
     draftedBy: input.draftedBy ?? null,
     pickNumber: input.pickNumber ?? null
   };

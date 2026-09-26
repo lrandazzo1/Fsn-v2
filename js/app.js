@@ -16,9 +16,11 @@ import { DraftEngine } from './draftEngine.js';
 import { DraftRepository, SeasonRepository } from './persistence.js';
 import { Router } from './router.js';
 import { SeasonEngine } from './seasonEngine.js';
+import { indexPlayerAssets } from './playerAssets.js';
 import {
   cacheDom,
   dom,
+  installImageFallbacks,
   refreshIcons,
   renderAll,
   renderClock,
@@ -72,6 +74,7 @@ let router = null;
 
 async function init() {
   cacheDom();
+  installImageFallbacks();
   renderRosterSelect(engine, ui);
   bindEvents();
 
@@ -118,6 +121,29 @@ async function init() {
 
   await restoreDraft();
   await restoreSeason();
+  await loadPlayerAssets();
+}
+
+/**
+ * Pulls the pool's headshots out of `fsnv2.players` and merges them into the
+ * engine, which repaints every open view.
+ *
+ * Deliberately last and deliberately quiet: imagery is decoration, so a failed
+ * read leaves the initials chips in place rather than blocking the boot or
+ * raising a toast. The draft pool itself is still the synthetic projection set
+ * in js/playerData.js — this only fills in `headshotUrl` / `espnId`, matching on
+ * the `p-0042` ids the pool sync wrote, then on name + position for rows the
+ * provider keyed its own way.
+ */
+async function loadPlayerAssets() {
+  if (!repo.enabled) return;
+  try {
+    const rows = await repo.playerAssets();
+    const matched = engine.setPlayerAssets(indexPlayerAssets(rows));
+    if (matched === 0) console.info('fsn: no player headshots matched the pool.');
+  } catch (error) {
+    console.warn(`fsn: player headshots unavailable — ${error.message}`);
+  }
 }
 
 /**

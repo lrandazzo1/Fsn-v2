@@ -35,6 +35,7 @@ styles.css              Dark sports-network design system (position colour codin
 js/config.js            Supabase credentials + league defaults (override via window.FSN_CONFIG)
 js/types.js             Player / Team / Pick / DraftState shapes + roster slot template
 js/playerData.js        The player pool (compact tuples -> Player objects)
+js/playerAssets.js      Headshot transform + merge: fsnv2.players rows -> player.headshotUrl
 js/vorMath.js           Replacement levels, VOR, tiers, derived ADP, scarcity, recommendations
 js/draftTimer.js        The pick clock (injectable scheduler so tests run instantly)
 js/draftEngine.js       Snake state machine: pick progression, clock expiry, bots, undo, hydrate
@@ -42,7 +43,7 @@ js/seasonEngine.js      Round-robin schedule, weekly score engine, W-L / PF / PA
 js/nflTeams.js          NFL colours, logo URLs and the synthetic weekly opponent slate
 js/persistence.js       DraftRepository + SeasonRepository — Supabase RPCs, localStorage mirror
 js/router.js            Hash router for the app shell
-js/uiRenderer.js        Draft-room rendering + shared view helpers
+js/uiRenderer.js        Draft-room rendering + shared view helpers (incl. the headshot avatar)
 js/views/home.js        Home Dashboard
 js/views/league.js      League Overview (season standings + roster composition)
 js/views/matchup.js     Matchup / Scoreboard hub
@@ -58,9 +59,10 @@ scripts/build-api.mjs   esbuild bundle for that one function
 vercel.json             Build + cron schedule + function limits
 scripts/sync-data.ts    Sync CLI (npm run sync:data)
 scripts/test-sync-data.ts  Sync verification CLI (npm run test:sync-data)
-supabase/migrations/    Schema + RPC migrations (0004 adds the sync tables, 0005 the derivations)
+supabase/migrations/    Schema + RPC migrations (0004 the sync tables, 0005 the derivations, 0006 headshots)
 tests/engine.test.mjs   41 assertions: snake order, clock expiry, rosters, hydration
 tests/season.test.mjs   42 assertions: schedule, simulation, standings, hydration
+tests/player-assets.test.mjs  28 assertions: headshot transform, merge, avatar markup, onError
 tests/draft-sim.test.mjs Full 15-round simulation + optional database round-trip
 ```
 
@@ -176,22 +178,68 @@ generated schedule is not a perfect matching (N offending team-weeks)
 
 - **Week selector** — weeks 1-14, marking which are final.
 - **My Matchup** — the two starting lineups side by side, slot against slot
-  (QB vs QB, RB vs RB, FLEX vs FLEX), each player with their NFL team logo,
-  that week's opponent (`@ MIA`, `vs NYJ`) and projected or actual points.
+  (QB vs QB, RB vs RB, FLEX vs FLEX), each player with their headshot, that
+  week's opponent (`@ MIA`, `vs NYJ`) and projected or actual points.
 - **Live win probability** — a logistic fit to the projected margin
   (`1 / (1 + e^(-1.702 * margin / 28))`), with the projected totals above it.
   A finished game reports the result instead of a forecast.
 - **League Scoreboard** — all six of the week's games as a grid; clicking a
   card opens that head-to-head.
 
-Team logos load from a CDN, and — like the Tailwind and Lucide layers — the UI
-has to survive that CDN being blocked. The logo sits on top of a chip carrying
-the team's abbreviation in its primary colour, so a failed load degrades to the
-chip instead of a broken-image icon.
-
 > The weekly NFL opponents are synthetic, exactly like the projections in
 > `playerData.js`: a 32-team round robin over the same seeded shuffle. They are
 > display context next to a player's name, never an input to scoring.
+
+## Player headshots
+
+Every row that names a player — the pool in the draft room, the starting lineup
+and bench, the head-to-head grid, the Team page's week summary — renders a
+**Player Headshot Avatar** instead of a bare team badge.
+
+The images are not in `js/playerData.js`. That pool is four columns wide by
+design, so `loadPlayers()` can only ever produce `headshotUrl: null`; the
+headshots live in Postgres, on `fsnv2.players.headshot_url`, next to the
+external ids the player audit resolved. The pipeline that joins the two:
+
+```
+public.fsnv2_player_assets(limit)      id, name, position, team, headshot_url, espn_id
+  -> DraftRepository.playerAssets()    js/persistence.js  — one read on boot
+  -> normalizeAssetRow()               js/playerAssets.js — headshot_url -> headshotUrl
+  -> indexPlayerAssets()                                  — by id, and by name+position
+  -> engine.setPlayerAssets()          js/draftEngine.js  — merge + repaint every view
+  -> playerAvatar(player)              js/uiRenderer.js   — the <img> itself
+```
+
+Matching is by row id first (`p-0042` — the ids `fsnv2_upsert_players` writes)
+and then by name + position, so a provider row keyed `tank01-3916387` still
+lights up the `p-0001` the draft board is built from. The name key mirrors
+`public.fsnv2_player_key()` in SQL: lowercase, alphanumerics only. The merge only
+ever adds imagery, and the index is held on the engine, so `reset()` — which
+rebuilds the pool from `playerData.js` — does not lose it.
+
+`normalizeAssetRow()` accepts `headshot_url` **or** `headshotUrl` (and `espn_id`
+or `espnId`), derives the URL from the ESPN id when the column is null, and
+refuses anything that is not `http(s)` before it reaches an `src`.
+
+Images come from a CDN, and — like the Tailwind and Lucide layers — the UI has
+to survive that CDN being blocked, a 404 for a player the audit could not
+resolve, or Supabase being unreachable entirely. The avatar is three layers deep
+and degrades one step at a time:
+
+| Layer | Shown when |
+| --- | --- |
+| the headshot (`player.headshotUrl`) | the database had one and it loads |
+| the team logo (`data-fallback`) | the headshot 404s, or there is no headshot |
+| initials on a team-coloured chip | both images fail, or images are off entirely |
+
+The hop is driven by one capture-phase `error` listener on the document
+(`installImageFallbacks()`), not an inline `onerror` per tag: `error` does not
+bubble from an `<img>`, but it does reach a capture listener, so one handler
+covers markup that is rewritten on every render, with no inline JavaScript and
+nothing to re-bind. An image walks its `data-fallback` once, then removes itself
+to reveal the chip. A D/ST skips the corner team logo — its "headshot" already
+*is* the logo — and the whole read is best-effort: it runs last in the boot
+sequence and a failure leaves the initials chips in place without a toast.
 
 ## Simulate Week (the dummy score engine)
 
@@ -237,7 +285,7 @@ never collide with the existing `public.*` tables.
 | `fsnv2.leagues` | `id`, `name`, `total_teams`, `roster_settings` (jsonb), `scoring_type`, timestamps |
 | `fsnv2.drafts` | `id`, `league_id`, `current_pick`, `status`, `timer_seconds`, `rounds`, `draft_type`, `teams` (jsonb), timestamps |
 | `fsnv2.draft_picks` | `id`, `draft_id`, `pick_number`, `round`, `team_id`, `player_id`, `picked_at`, `auto`, `source` |
-| `fsnv2.players` | `id`, `name`, `position`, `team`, `adp`, `stats` (jsonb), timestamps |
+| `fsnv2.players` | `id`, `name`, `position`, `team`, `adp`, `stats` (jsonb), `headshot_url`, timestamps |
 | `fsnv2.matchups` | `id`, `league_id`, `week`, `team_a_id`, `team_b_id`, `team_a_score`, `team_b_score`, `status` |
 | `fsnv2.player_week_scores` | `id`, `league_id`, `week`, `team_id`, `player_id`, `slot`, `starter`, `projected`, `points` |
 | `fsnv2.nfl_teams` | `id`, `provider`, `external_id`, `abbr`, `city`, `name`, `conference`, `division`, `bye_week`, `logo_url`, `raw`, `synced_at` |
@@ -252,6 +300,13 @@ Migration `0004` also extends `fsnv2.players` in place with `provider`,
 `unique (provider, external_id)`. The synthetic pool in `js/playerData.js` keeps
 its `p-0001` ids and null provider, so the draft board is untouched; synced rows
 sit beside them keyed `<provider>-<external_id>`.
+
+Migration `0006` covers the player audit's columns — `gsis_id`, `espn_id`,
+`sleeper_id`, `rotowire_id`, `headshot_url`, `audited_at`, `team_source` — which
+were applied to the live project ahead of the file, so its `add column if not
+exists` block is a documented no-op there and the migration set stays the schema
+of record. What is new in it is `public.fsnv2_player_assets(limit)`, the narrow
+read the avatars use (see [Player headshots](#player-headshots)).
 
 Constraints that keep a board honest: `unique (draft_id, pick_number)`,
 `unique (draft_id, player_id)`, and a FK from `draft_picks.player_id` to
@@ -274,6 +329,7 @@ security-definer RPCs in `public`:
 | `fsnv2_record_pick(draft, pick_number, player_id[, team_id, auto, source])` | **validates and persists one pick** |
 | `fsnv2_undo_pick` / `fsnv2_reset_draft` | rewind |
 | `fsnv2_draft_state(draft)` / `fsnv2_players(limit)` / `fsnv2_leagues()` | reads |
+| `fsnv2_player_assets(limit)` | the avatars' read: id, name, position, team, headshot_url, espn_id |
 | `fsnv2_lcg_shuffle(count, seed)` / `fsnv2_round_robin(teams)` | canonical schedule math |
 | `fsnv2_generate_schedule(league[, weeks, seed, replace])` | **builds the 14 weeks**, idempotent |
 | `fsnv2_simulate_week(league, week, scores)` | stores a box score and re-sums the team totals |
@@ -533,9 +589,10 @@ npm run dev            # python3 -m http.server 8000
 ## Tests
 
 ```bash
-npm test               # engine + season suites, then the full 15-round simulation
+npm test               # engine, season and player-asset suites, then the full simulation
 npm run test:engine    # draft engine only
 npm run test:season    # season matchup engine only
+npm run test:assets    # headshot transform, merge and avatar markup only
 npm run test:db        # also persist the simulation to Supabase and verify
 npm run test:sync-data # the sports-data ingestion layer (no network, no keys)
 npm run typecheck      # tsc over api, lib and scripts (needs npm install)
@@ -553,6 +610,13 @@ vectors read back from Postgres, the score engine (totals equal the sum of the
 starters; scores sit near but not on the projection), the standings invariants
 (wins balance losses, league Points For equals Points Against) and the
 persistence round trip.
+
+`tests/player-assets.test.mjs` (28 assertions) covers the headshot pipeline: the
+row transform in both spellings, a headshot derived from an ESPN id, non-`http`
+URLs refused, the index preferring rows that actually carry an image, the merge
+by id and by name + position, headshots surviving `engine.reset()`, the avatar's
+fallback cascade and attribute escaping, and the delegated `error` handler
+hopping to the team logo once and then removing the image.
 
 `npm run test:sync-data` verifies the ingestion layer in four phases and exits 0
 on a machine with no credentials and no network:

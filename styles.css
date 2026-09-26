@@ -484,7 +484,8 @@ kbd {
 
 .player-row {
   display: grid;
-  grid-template-columns: 38px minmax(0, 1fr) auto;
+  /* avatar · position badge · name+meta · stats (· owner) */
+  grid-template-columns: 26px 38px minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   width: 100%;
@@ -969,6 +970,7 @@ kbd {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .matchup__player.is-right { justify-content: flex-end; }
+.matchup__player-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .matchup__player.is-win { color: var(--text); }
 .matchup__player b { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-faint); }
 .matchup__player.is-win b { color: var(--brand-bright); }
@@ -1111,29 +1113,66 @@ kbd {
   box-shadow: inset 0 0 0 1px rgba(18, 201, 138, 0.35);
 }
 
-/* ------------------------------------------------------- team logo chip --- */
+/* --------------------------------------------------- player headshot avatar */
 
-.team-logo {
+/*
+ * Three stacked layers, so a row always reads even with images off:
+ *   .player-avatar__initials   team-coloured chip, painted underneath
+ *   .player-avatar__img        the headshot (or the team logo as its fallback)
+ *   .player-avatar__team       tiny team logo in the corner, for context
+ * The <img> removes itself when both URLs fail, revealing the chip again.
+ */
+.player-avatar {
   position: relative;
   display: grid; place-items: center;
-  width: 22px; height: 22px;
+  width: 26px; height: 26px;
   flex: none;
   border-radius: 999px;
   background: var(--team-color, #475569);
-  overflow: hidden;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  overflow: visible;
 }
-.team-logo__abbr {
+.player-avatar--xs { width: 20px; height: 20px; }
+.player-avatar--sm { width: 26px; height: 26px; }
+.player-avatar--md { width: 32px; height: 32px; }
+
+.player-avatar__initials {
   font-family: 'JetBrains Mono', monospace;
-  font-size: 7px; font-weight: 600; letter-spacing: -0.02em;
-  color: #fff;
-  mix-blend-mode: normal;
+  font-weight: 700; font-size: 8.5px; letter-spacing: -0.02em;
+  color: rgba(255, 255, 255, 0.92);
 }
-.team-logo img {
+.player-avatar--md .player-avatar__initials { font-size: 10px; }
+.player-avatar--xs .player-avatar__initials { font-size: 7.5px; }
+
+.player-avatar__img {
   position: absolute; inset: 0;
   width: 100%; height: 100%;
-  object-fit: contain;
-  background: rgba(7, 9, 13, 0.55);
+  border-radius: 999px;
+  object-fit: cover;
+  /* Headshots are shot chest-up; nudging the crop keeps the face centred. */
+  object-position: 50% 12%;
+  background: #0b1016;
 }
+/* The team logo standing in for a missing headshot: contain, not cover. */
+.player-avatar__img.is-fallback {
+  object-fit: contain;
+  object-position: 50% 50%;
+  background: rgba(7, 9, 13, 0.55);
+  padding: 2px;
+}
+
+.player-avatar__team {
+  position: absolute; right: -2px; bottom: -2px;
+  width: 12px; height: 12px;
+  display: grid; place-items: center;
+  border-radius: 999px;
+  background: rgba(7, 9, 13, 0.92);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.14);
+  overflow: hidden;
+}
+.player-avatar--md .player-avatar__team { width: 14px; height: 14px; right: -3px; bottom: -3px; }
+.player-avatar--xs .player-avatar__team { width: 10px; height: 10px; }
+.player-avatar__team img { width: 100%; height: 100%; object-fit: contain; }
 
 /* ----------------------------------------------------------- head to head -- */
 

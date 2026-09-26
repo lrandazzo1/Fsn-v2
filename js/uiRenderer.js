@@ -10,6 +10,7 @@
  */
 
 import { POSITIONS, ROSTER_SLOTS } from './types.js';
+import { avatarSources } from './playerAssets.js';
 import { positionalScarcity } from './vorMath.js';
 
 /** Cached element lookups. */
@@ -35,6 +36,77 @@ export function cacheDom() {
 /** Re-scan the document for Lucide icon placeholders. */
 export function refreshIcons() {
   if (window.lucide?.createIcons) window.lucide.createIcons();
+}
+
+/* ------------------------------------------------------ player headshots --- */
+
+/**
+ * Player Headshot Avatar — the component every player row renders instead of a
+ * bare team badge. Three layers, so there is always something to look at:
+ *
+ *   1. initials chip in the team's colour, painted underneath
+ *   2. the headshot itself (`player.headshotUrl`), falling back to the team logo
+ *   3. a small team logo in the corner, kept as context rather than as the whole
+ *      avatar — a D/ST skips it, since its "headshot" already *is* the logo
+ *
+ * @param {import('./types.js').Player|null} player
+ * @param {{size?: 'xs'|'sm'|'md', team?: boolean, lazy?: boolean}} [options]
+ */
+export function playerAvatar(player, { size = 'sm', team = true, lazy = true } = {}) {
+  if (!player) return '';
+  const { src, fallback, initials, color, teamLogo } = avatarSources(player);
+  const label = `${player.name}${player.team ? ` · ${player.team}` : ''}`;
+  const corner = team && teamLogo;
+
+  return `<span class="player-avatar player-avatar--${size}${corner ? ' has-team' : ''}"
+                style="--team-color:${color}" title="${escapeHtml(label)}">
+      <span class="player-avatar__initials" aria-hidden="true">${escapeHtml(initials)}</span>
+      ${
+        src
+          ? `<img class="player-avatar__img" src="${escapeHtml(src)}" alt="${escapeHtml(player.name)}"
+                  ${lazy ? 'loading="lazy"' : ''} decoding="async" data-on-error="remove"
+                  ${fallback ? `data-fallback="${escapeHtml(fallback)}"` : ''} />`
+          : ''
+      }
+      ${
+        corner
+          ? `<span class="player-avatar__team" aria-hidden="true">
+               <img src="${escapeHtml(teamLogo)}" alt="" loading="lazy" decoding="async" data-on-error="remove" />
+             </span>`
+          : ''
+      }
+    </span>`;
+}
+
+/**
+ * The `onError` handler for every image the app renders, installed once.
+ *
+ * `error` does not bubble from an `<img>`, but it does reach a capture-phase
+ * listener on the document — so one listener covers markup that is rewritten on
+ * every render, with no inline JavaScript and nothing to re-bind. An image walks
+ * its `data-fallback` (headshot -> team logo) and, when that fails too, removes
+ * itself to reveal the initials chip underneath.
+ *
+ * @param {Document|HTMLElement} [root]
+ */
+export function installImageFallbacks(root = document) {
+  root.addEventListener(
+    'error',
+    (event) => {
+      const img = event.target;
+      if (!img || img.tagName !== 'IMG') return;
+
+      const next = img.dataset.fallback;
+      if (next && next !== img.getAttribute('src')) {
+        delete img.dataset.fallback;
+        img.classList.add('is-fallback');
+        img.src = next;
+        return;
+      }
+      if (img.dataset.onError === 'remove') img.remove();
+    },
+    true
+  );
 }
 
 /* ------------------------------------------------------------------ header */
@@ -238,6 +310,7 @@ export function renderPool(engine, ui) {
     const owner = player.draftedBy ? engine.teamById(player.draftedBy).abbr : null;
 
     row.innerHTML = `
+      ${playerAvatar(player)}
       ${badge(player.position)}
       <span class="player-row__main">
         <span class="player-row__name">${escapeHtml(player.name)}</span>
@@ -315,6 +388,7 @@ export function renderSlots(container, engine, teamId, scope = 'all') {
       ${
         player
           ? `<span class="roster-slot__player">
+               ${playerAvatar(player, { size: 'xs' })}
                ${badge(player.position, true)}
                <span class="roster-slot__name">${escapeHtml(player.name)}</span>
                <span class="roster-slot__team">${player.team}</span>

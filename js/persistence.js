@@ -180,6 +180,26 @@ export class DraftRepository {
     return this.rpc('fsnv2_players', { p_limit: limit });
   }
 
+  /**
+   * The imagery/identity slice of the pool: `id`, `name`, `position`, `team`,
+   * `headshot_url`, `espn_id` — what the avatars need and nothing else. The
+   * full `fsnv2_players` read is ~575 kB of projections, stats and injury JSON
+   * for the same 740 rows, so the UI asks for the narrow one.
+   *
+   * Falls back to `fsnv2_players` when the project has not had migration
+   * `0006_fsnv2_player_headshots.sql` applied yet: that read returns whole rows,
+   * `headshot_url` included, and the transformer takes either shape.
+   */
+  async playerAssets(limit = 2000) {
+    try {
+      return await this.rpc('fsnv2_player_assets', { p_limit: limit });
+    } catch (error) {
+      const missing = /PGRST202|Could not find the function|\(404\)/i.test(error.message || '');
+      if (!missing) throw error;
+      return this.players(limit);
+    }
+  }
+
   /* ------------------------------------------------------------------- queue */
 
   enqueue(name, args) {

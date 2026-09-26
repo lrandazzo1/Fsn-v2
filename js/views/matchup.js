@@ -4,7 +4,7 @@
  * Phase 1 showed a single head-to-head projection tucked into the Team page.
  * This is that panel grown into its own screen: a week selector for all 14
  * weeks, a full side-by-side starting-lineup comparison (QB against QB, RB
- * against RB) with team logos, NFL opponents and projected/actual points, and
+ * against RB) with player headshots, NFL opponents and projected/actual points, and
  * a League Scoreboard showing all six of the week's games at once.
  *
  * The view owns no state of its own beyond the render — the selected week and
@@ -12,8 +12,8 @@
  * read the same week.
  */
 
-import { opponentLabel, teamColor, teamLogoUrl } from '../nflTeams.js';
-import { badge, escapeHtml, refreshIcons, renderTeamOptions } from '../uiRenderer.js';
+import { opponentLabel } from '../nflTeams.js';
+import { badge, escapeHtml, playerAvatar, refreshIcons, renderTeamOptions } from '../uiRenderer.js';
 
 export function createMatchupView({ engine, season, ui, router, onSimulateWeek, onSimulateThrough, onResetSeason }) {
   const el = {
@@ -239,7 +239,13 @@ export function createMatchupView({ engine, season, ui, router, onSimulateWeek, 
       .join('');
   }
 
-  /** Logo + name + NFL opponent + points. Mirrored for the away column. */
+  /**
+   * Headshot + name + NFL opponent + points. Mirrored for the away column.
+   *
+   * The avatar replaces what used to be a bare team badge here: a lineup of
+   * eighteen rows all showing BAL/PHI logos told you nothing that the name next
+   * to it did not. The team logo survives as the corner overlay on the avatar.
+   */
   function playerCell(week, player, points, winning, right) {
     if (!player) {
       return `<span class="h2h__player is-empty">${right ? '' : '<em>Empty</em>'}<b>—</b>${right ? '<em>Empty</em>' : ''}</span>`;
@@ -251,10 +257,10 @@ export function createMatchupView({ engine, season, ui, router, onSimulateWeek, 
         <span class="h2h__player-meta">${player.position} · ${escapeHtml(opponentLabel(player.team, week))}</span>
       </span>`;
     const pts = `<b class="${winning ? 'is-win' : ''}">${fmt(points)}</b>`;
-    const logo = teamLogoHtml(player.team);
+    const face = playerAvatar(player, { size: 'md' });
 
     return `<span class="h2h__player${winning ? ' is-win' : ''}">${
-      right ? `${pts}${meta}${logo}` : `${logo}${meta}${pts}`
+      right ? `${pts}${meta}${face}` : `${face}${meta}${pts}`
     }</span>`;
   }
 
@@ -317,19 +323,6 @@ export function createMatchupView({ engine, season, ui, router, onSimulateWeek, 
 }
 
 /* ----------------------------------------------------------------- helpers */
-
-/**
- * The image sits on top of a coloured abbreviation chip, so a blocked CDN
- * degrades to the chip instead of a broken-image icon.
- */
-function teamLogoHtml(abbr) {
-  const url = teamLogoUrl(abbr);
-  return `
-    <span class="team-logo" style="--team-color:${teamColor(abbr)}" title="${escapeHtml(abbr)}">
-      <span class="team-logo__abbr">${escapeHtml(abbr)}</span>
-      ${url ? `<img src="${url}" alt="" loading="lazy" onerror="this.remove()" />` : ''}
-    </span>`;
-}
 
 function fmt(value) {
   return Number(value || 0).toFixed(1);

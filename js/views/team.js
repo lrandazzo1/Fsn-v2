@@ -14,6 +14,7 @@ import {
   escapeHtml,
   formatVor,
   pickFeedHtml,
+  playerAvatar,
   refreshIcons,
   renderSlots,
   renderTeamOptions
@@ -147,13 +148,13 @@ export function createTeamView({ engine, season, ui, router }) {
             return `
               <div class="matchup__row">
                 <span class="matchup__player ${minePts >= themPts ? 'is-win' : ''}">
-                  ${me ? escapeHtml(me.name) : '<em>empty</em>'}
+                  ${me ? `${playerAvatar(me, { size: 'xs' })}<span class="matchup__player-name">${escapeHtml(me.name)}</span>` : '<em>empty</em>'}
                   <b>${me ? minePts.toFixed(1) : '—'}</b>
                 </span>
                 <span class="matchup__slot">${badge(slot.label === 'FLEX' ? 'FLEX' : slot.label, true)}</span>
                 <span class="matchup__player is-right ${themPts > minePts ? 'is-win' : ''}">
                   <b>${them ? themPts.toFixed(1) : '—'}</b>
-                  ${them ? escapeHtml(them.name) : '<em>empty</em>'}
+                  ${them ? `<span class="matchup__player-name">${escapeHtml(them.name)}</span>${playerAvatar(them, { size: 'xs' })}` : '<em>empty</em>'}
                 </span>
               </div>`;
           })
