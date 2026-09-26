@@ -87,12 +87,22 @@ const previousFetch = global.fetch;
 process.env.SUPABASE_URL = 'https://example.supabase.co';
 process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-server-key';
 let requestBody;
-global.fetch = async (url, options) => {
-  assert.match(url, /\/rest\/v1\/rpc\/fsnv2_swap_lineup$/);
+let lockBody = null;
+/**
+ * The route asks `fsnv2_locked_players` before it writes, so every mock here
+ * answers both RPCs: an empty array means neither player's game has started.
+ */
+const lockedPlayers = (rows = []) => async (url, options) => {
   assert.equal(options.headers.Authorization, 'Bearer test-server-key');
+  if (/\/rpc\/fsnv2_locked_players$/.test(url)) {
+    lockBody = JSON.parse(options.body);
+    return { ok: true, json: async () => rows };
+  }
+  assert.match(url, /\/rest\/v1\/rpc\/fsnv2_swap_lineup$/);
   requestBody = JSON.parse(options.body);
   return { ok: true, json: async () => ({ roster: expected, version: 2 }) };
 };
+global.fetch = lockedPlayers();
 const res = {
   status(code) { this.statusCode = code; return this; },
   setHeader() { return this; },
@@ -106,6 +116,8 @@ await swapHandler({ method: 'POST', body: {
 assert.equal(res.statusCode, 200);
 assert.equal(requestBody.p_expected_version, 1);
 assert.equal(requestBody.p_team_id, teamId);
+// Both sides of the swap are checked against the kickoff times, not just one.
+assert.deepEqual(lockBody.p_player_ids, [expected.WR1, expected.WR2]);
 await swapHandler({ method: 'POST', body: {
   draftId, teamId, from: 'QB', to: 'WR1', fromPlayerId: expected.QB,
   toPlayerId: expected.WR1, expectedVersion: -1
@@ -124,8 +136,12 @@ const swap = { draftId, teamId, from: 'WR1', to: 'WR2',
   fromPlayerId: expected.WR1, toPlayerId: expected.WR2, expectedVersion: 1 };
 const missing = { ok: false, status: 404, json: async () => ({ code: 'PGRST202',
   message: 'Could not find the function public.fsnv2_swap_lineup(...) in the schema cache' }) };
+const unlocked = { ok: true, json: async () => [] };
 let calls = 0;
-global.fetch = async () => (++calls === 1 ? missing : { ok: true, json: async () => ({ roster: expected, version: 3 }) });
+global.fetch = async (url) => {
+  if (/\/rpc\/fsnv2_locked_players$/.test(url)) return unlocked;
+  return ++calls === 1 ? missing : { ok: true, json: async () => ({ roster: expected, version: 3 }) };
+};
 await swapHandler({ method: 'POST', body: swap }, res);
 assert.equal(calls, 2);
 assert.equal(res.statusCode, 200);
@@ -134,11 +150,52 @@ assert.equal(res.body.version, 3);
 // Still missing after the retry: the migration is not on the project. Say that
 // rather than repeating PostgREST's wording in the toast.
 calls = 0;
-global.fetch = async () => { calls += 1; return missing; };
+global.fetch = async (url) => {
+  if (/\/rpc\/fsnv2_locked_players$/.test(url)) return unlocked;
+  calls += 1;
+  return missing;
+};
 await swapHandler({ method: 'POST', body: swap }, res);
 assert.equal(calls, 2);
 assert.equal(res.statusCode, 503);
 assert.match(res.body.error, /0008_fsnv2_lineup_swaps\.sql/);
+
+// ---------------------------------------------------------------- the lock --
+// A player whose game has started cannot be moved, and the swap never reaches
+// the write. The same applies whichever side of the swap they are on: the
+// route sends both ids and refuses on the first one the database flags.
+let reachedSwap = false;
+global.fetch = async (url) => {
+  if (/\/rpc\/fsnv2_locked_players$/.test(url)) {
+    return { ok: true, json: async () => [{ player_id: expected.WR1, name: 'Josh Jacobs', team: 'GB' }] };
+  }
+  reachedSwap = true;
+  return { ok: true, json: async () => ({ roster: expected, version: 4 }) };
+};
+await swapHandler({ method: 'POST', body: swap }, res);
+assert.equal(res.statusCode, 400);
+assert.equal(res.body.error,
+  'Cannot move player: Josh Jacobs is locked because their game has already started.');
+assert.equal(reachedSwap, false, 'a locked swap must never reach fsnv2_swap_lineup');
+
+// Postgres re-checks inside the write; if it refuses there, that is a 400 too.
+global.fetch = async (url) => {
+  if (/\/rpc\/fsnv2_locked_players$/.test(url)) return unlocked;
+  return { ok: false, status: 400, json: async () => ({ code: 'P0001',
+    message: 'Cannot move player: Tyreek Hill is locked because their game has already started.' }) };
+};
+await swapHandler({ method: 'POST', body: swap }, res);
+assert.equal(res.statusCode, 400);
+assert.match(res.body.error, /Tyreek Hill is locked/);
+
+// Without migration 0013 there is no guard at all, so the route says so rather
+// than writing a swap nothing has checked.
+global.fetch = async (url) => (/\/rpc\/fsnv2_locked_players$/.test(url)
+  ? { ok: false, status: 404, json: async () => ({ code: 'PGRST202', message: 'missing' }) }
+  : { ok: true, json: async () => ({ roster: expected, version: 5 }) });
+await swapHandler({ method: 'POST', body: swap }, res);
+assert.equal(res.statusCode, 503);
+assert.match(res.body.error, /0013_fsnv2_lineup_locks\.sql/);
 
 global.fetch = previousFetch;
 if (previousUrl === undefined) delete process.env.SUPABASE_URL;

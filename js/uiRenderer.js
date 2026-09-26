@@ -10,6 +10,7 @@
  */
 
 import { hasLiveSlate, normalizeAbbr, playerOpponentLabel, teamLogoHtml } from './nflTeams.js';
+import { lockLabel, lockStateInWeek, lockedPlayerMessage } from './gameLock.js';
 import { POSITIONS, ROSTER_SLOTS } from './types.js';
 import { avatarSources } from './playerAssets.js';
 import { positionalScarcity, valueDelta } from './vorMath.js';
@@ -368,6 +369,12 @@ export function renderRosterSelect(engine, ui) {
  * @param {HTMLElement} container
  * @param {'all'|'starters'|'bench'} scope
  */
+/** The 🔒 a locked row wears, with the kickoff behind it in the tooltip. */
+function lockChip(state) {
+  const label = lockLabel(state) || 'game started';
+  return `<span class="roster-slot__lock" role="img" aria-label="locked — ${escapeHtml(label)}" title="Locked: ${escapeHtml(label)}">🔒</span>`;
+}
+
 export function renderSlots(container, engine, teamId, scope = 'all', week = null, lineup = null) {
   const roster = engine.rosterFor(teamId);
   const slots = ROSTER_SLOTS.filter((slot) =>
@@ -391,14 +398,30 @@ export function renderSlots(container, engine, teamId, scope = 'all', week = nul
             hasLiveSlate(week) && label !== 'BYE' ? '' : ' is-projected'
           }">${escapeHtml(label)}</span>`
         : '';
+    // A player whose game has kicked off is frozen for the week: the row says so
+    // with a 🔒, stops being selectable, and is never offered as a target. The
+    // rule itself lives in js/gameLock.js and is enforced again in js/lineup.js,
+    // in api/roster/swap.js and inside fsnv2_swap_lineup — this is only how it
+    // looks.
+    const lock = lineup && player ? lineup.lockedPlayer(slot.key) : null;
+    if (lock) row.classList.add('is-locked');
+
     if (lineup) {
       row.classList.add('roster-slot--interactive');
-      if (lineup.selectedSlot === slot.key) row.classList.add('is-selected');
+      if (lock) {
+        row.setAttribute('aria-disabled', 'true');
+        row.title = lockedPlayerMessage(player);
+      } else if (lineup.selectedSlot === slot.key) row.classList.add('is-selected');
       else if (lineup.validTarget(slot.key)) row.classList.add('is-target');
       row.dataset.slot = slot.key;
       row.setAttribute('role', 'button');
-      row.setAttribute('tabindex', lineup.pending ? '-1' : '0');
-      row.setAttribute('aria-label', `${lineup.selectedSlot ? 'Swap with' : 'Select'} ${player ? player.name : 'empty'} ${slot.label} slot`);
+      row.setAttribute('tabindex', lineup.pending || lock ? '-1' : '0');
+      row.setAttribute(
+        'aria-label',
+        lock
+          ? `${player.name} is locked — their ${slot.label} game has already started`
+          : `${lineup.selectedSlot ? 'Swap with' : 'Select'} ${player ? player.name : 'empty'} ${slot.label} slot`
+      );
       row.setAttribute('aria-pressed', String(lineup.selectedSlot === slot.key));
     }
     row.innerHTML = `
@@ -411,6 +434,7 @@ export function renderSlots(container, engine, teamId, scope = 'all', week = nul
                <span class="roster-slot__name">${escapeHtml(player.name)}</span>
                <span class="roster-slot__team">${escapeHtml(normalizeAbbr(player.team))}</span>
                ${fixture}
+               ${lock ? lockChip(lockStateInWeek(player, week)) : ''}
              </span>
              <span class="roster-slot__pts">${player.projection}</span>`
           : '<span class="roster-slot__player roster-slot__player--empty">Empty</span><span class="roster-slot__pts">—</span>'

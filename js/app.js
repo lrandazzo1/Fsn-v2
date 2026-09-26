@@ -16,6 +16,7 @@
 import { CONFIG } from './config.js';
 import { DraftEngine } from './draftEngine.js';
 import { createLiveData } from './liveData.js';
+import { setLockSchedule } from './gameLock.js';
 import { getCurrentNFLWeek } from './nflWeek.js';
 import { useLiveMatchupStats } from './useLiveMatchupStats.js';
 import { annotatePlayers, liveSlateWeeks, setLiveSlate } from './nflTeams.js';
@@ -187,9 +188,10 @@ async function loadMarketRanks() {
  *   fsnv2_projections   real per-week fantasy points, replacing the
  *                       season-total-over-17 estimate.
  *   fsnv2_nfl_schedule  the real slate behind every "@ MIA" / "vs NYJ" / "BYE"
- *                       tag. There is no generated slate behind it: a week the
- *                       sync has not stored reads '—' rather than inventing a
- *                       fixture (see js/nflTeams.js).
+ *                       tag, and the kickoff times behind the lineup lock. There
+ *                       is no generated slate behind it: a week the sync has not
+ *                       stored reads '—' rather than inventing a fixture (see
+ *                       js/nflTeams.js), and locks nobody.
  *
  * The pool and the projections are optional — a disabled, unreachable or empty
  * database leaves the offline pool in place and the app runs as it did before,
@@ -213,6 +215,11 @@ async function loadLiveData() {
     engine.usePlayerPool(mapSleeperMarket(live.pool, marketRanks, CONFIG.league.scoringType));
   }
   if (live.slate.size) setLiveSlate(live.slate);
+  // The same rows, read for kickoff times rather than opponents: this is what
+  // freezes a roster slot once its player's game has started. A week the sync
+  // has not stored simply has no kickoffs, and locks nobody — the lock is never
+  // inferred from a fixture the database does not have.
+  setLockSchedule(live.gamesByWeek);
   if (live.projectionWeeks.length) {
     season.setLiveProjections((player, week) => live.weeklyPoints(player, week));
   }

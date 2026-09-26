@@ -44,6 +44,8 @@ js/draftTimer.js        The pick clock (injectable scheduler so tests run instan
 js/draftEngine.js       Snake state machine: pick progression, clock expiry, bots, undo, hydrate
 js/seasonEngine.js      Round-robin schedule, weekly score engine, W-L / PF / PA standings
 js/nflTeams.js          NFL colours, logo URLs, team-code aliases and the synced weekly slate
+js/gameLock.js          The lineup lock: isPlayerLocked(), kickoff parsing, status aliases
+js/lineup.js            Slot selection, the swap, and the rollback when a save is refused
 js/persistence.js       DraftRepository + SeasonRepository — Supabase RPCs, live reads, localStorage mirror
 js/router.js            Hash router for the app shell
 js/uiRenderer.js        Draft-room rendering + shared view helpers (incl. the headshot avatar)
@@ -68,13 +70,16 @@ scripts/sync-data.ts    Sync CLI (npm run sync:data)
 scripts/test-sync-data.ts  Sync verification CLI (npm run test:sync-data)
 scripts/audit-players.ts   Player audit CLI (npm run audit:players)
 scripts/test-audit-players.ts  Audit verification CLI (npm run test:audit)
+api/roster/swap.js      GET the saved lineup, POST one guarded slot swap
 supabase/migrations/    Schema + RPC migrations (0004 adds the sync tables, 0005 the derivations,
                         0006 the team refresh, 0007 player identity + headshots,
                         0008 the saved lineup + swap RPC, 0009-0012 the audit
-                        counters, the upsert/sync merge and the assets RPC)
+                        counters, the upsert/sync merge and the assets RPC,
+                        0013 the lineup lock)
 tests/engine.test.mjs   41 assertions: snake order, clock expiry, rosters, hydration
 tests/season.test.mjs   51 assertions: schedule, simulation, standings, NFL matchups, hydration
 tests/player-assets.test.mjs  19 assertions: headshot transform, avatar markup, onError cascade
+tests/gamelock.test.mjs 27 assertions: the lock predicate, feed shapes, the swap guard, the route
 tests/draft-sim.test.mjs Full 15-round simulation + optional database round-trip
 ```
 
@@ -318,6 +323,100 @@ matchup score can never drift from the box score underneath it.
 W-L records, Points For and Points Against on `#/league` are derived from the
 matchup rows, so every simulated week moves the table the moment it goes final.
 
+## Lineup locks
+
+A lineup can be rearranged right up to the moment a player's NFL game kicks off,
+and not one second after. Without that rule a manager can watch the Packers put
+up 31 on Thursday night and *then* decide to start Josh Jacobs — or bench him
+having seen him do nothing.
+
+The rule is one predicate, `isPlayerLocked()` in **js/gameLock.js**:
+
+```js
+isPlayerLocked(player, gameSchedule, now = Date.now())
+```
+
+| Situation | Locked |
+| --- | --- |
+| Kickoff is still ahead | no |
+| `now >= kickoff` | **yes** |
+| Status is `In Progress` / `Completed` / `Final` | **yes**, whatever the clock says |
+| The player's team has no game that week (BYE) | no |
+| The game was postponed or canceled | no — it never started |
+| The week has not been synced, or the feed carries no kickoff | no — a lock is never inferred from missing data |
+
+It reads a game in whatever shape it arrives in — Tank01 (`gameTime_epoch`,
+`gameDate` + `gameTime`, `gameStatus`), Sleeper (`start_time`, `status`) or our
+own `fsnv2.nfl_matchups` rows (`kickoff`, `status`) — and a player's team from
+`teamAbv`, `team` or `nflTeam`, so no caller has to pre-map anything.
+
+### One predicate, four layers
+
+`js/gameLock.js` is a plain ES module with a `.d.ts` beside it precisely so that
+there is only ever one copy of this logic:
+
+| Layer | What it does with it |
+| --- | --- |
+| **Roster rows** (`js/uiRenderer.js`) | 🔒 on locked rows, `aria-disabled`, out of the tab order, never a target |
+| **Lineup manager** (`js/lineup.js`) | refuses the click and says why, before anything moves |
+| **Endpoint** (`api/roster/swap.js`) | 400 before the mutation RPC, via `fsnv2_locked_players` |
+| **Database** (migration 0013) | `fsnv2_swap_lineup` re-checks it *inside* the write |
+
+All four produce the same sentence:
+
+```
+Cannot move player: Josh Jacobs is locked because their game has already started.
+```
+
+**Both sides of a swap are checked** — the player moving into the lineup and the
+one moving out. Checking only the incoming player is the hole that lets a
+manager bench a Packer at halftime.
+
+The database check is not belt-and-braces theatre: it runs in the same
+transaction as the write, so a kickoff that lands between the endpoint's check
+and the swap itself cannot slip through, and a stale tab or a hand-rolled
+PostgREST call gets the same answer the UI would have given.
+
+### Where kickoff times come from
+
+The same `fsnv2_nfl_schedule` rows that already drive every "@ MIA" / "vs NYJ"
+tag. `js/liveData.js` lifts `kickoff` and `status` out of them into
+`gamesByWeek`, and `js/app.js` installs that with `setLockSchedule()` on boot —
+one read, two uses. There is no generated slate behind it: a week the sync has
+not stored has no kickoffs and locks nobody, exactly as it shows '—' rather than
+inventing a fixture.
+
+In Postgres the same question is `public.fsnv2_player_locked(team, season, week)`,
+reading `fsnv2.nfl_matchups`. The week is derived from the clock by
+`public.fsnv2_current_nfl_week()`, a mirror of `getCurrentNFLWeek()` in
+js/nflWeek.js, so a swap request does not have to be trusted to say which week
+it is.
+
+### Setting a lineup
+
+On **Team Roster** (`#/team/:id`) click a player, then the slot to swap them
+with. A locked row is dimmed, wears a 🔒 with the kickoff in its tooltip, cannot
+be picked up or swapped into, and explains itself if you try; the chip in the
+panel header counts how many of the roster are already frozen for the week. The
+week selector moves the locks with it — week 4 is wide open while week 3 is
+half played.
+
+`POST /api/roster/swap` is the only way a lineup is written:
+
+```bash
+curl -X POST https://<deployment>/api/roster/swap \
+  -H 'content-type: application/json' \
+  -d '{ "draftId": "8f4c…", "teamId": 1, "from": "RB1", "to": "BN2",
+        "fromPlayerId": "p-0042", "toPlayerId": null, "expectedVersion": 3 }'
+```
+
+| Response | When |
+| --- | --- |
+| `200 { roster, version }` | Both players movable; the swap was written |
+| `400 { error: "Cannot move player: …" }` | Either player's game has started |
+| `409` | The version is stale — another tab moved first |
+| `503` | Migration 0008 or 0013 is not on the project |
+
 ## Database (Supabase / Postgres)
 
 Applied to the Supabase project **FSN** as `fsnv2_draft_engine_schema`,
@@ -326,7 +425,7 @@ Applied to the Supabase project **FSN** as `fsnv2_draft_engine_schema`,
 tables and RPCs — apply it before the first sync run. Tables live in a dedicated `fsnv2` schema so they
 never collide with the existing `public.*` tables.
 
-**Apply them in order, all twelve.** `0006_fsnv2_player_team_refresh.sql` is not
+**Apply them in order, all thirteen.** `0006_fsnv2_player_team_refresh.sql` is not
 optional: without it `fsnv2_upsert_players` still carries its original 0002
 body, and the browser overwrites every synced roster on each page load (see
 [Team affiliations](#team-affiliations) below).
@@ -335,7 +434,11 @@ body, and the browser overwrites every synced roster on each page load (see
 function public.fsnv2_swap_lineup(...) in the schema cache`, which is PostgREST
 saying the function is not on the project rather than anything about the
 request. It ends with `notify pgrst, 'reload schema'` so the new RPCs are
-callable as soon as it is applied. Every
+callable as soon as it is applied.
+`0013_fsnv2_lineup_locks.sql` is what stops a swap after kickoff (see
+[Lineup locks](#lineup-locks) below); until it is applied `/api/roster/swap`
+refuses every swap with *"Lineup locks are not set up yet"* rather than writing
+one nothing has checked. Every
 migration is idempotent, so re-applying one on a project that already has it is
 a no-op.
 
@@ -960,6 +1063,15 @@ on a machine with no credentials and no network:
 5. **Live** — with `SPORTS_DATA_API_KEY` set it hits the real endpoints; with
    `--live` and a `SUPABASE_SERVICE_ROLE_KEY` it upserts, re-upserts and reads
    back through `fsnv2_sync_status`. Without those it reports both as skipped.
+
+`tests/gamelock.test.mjs` (27 assertions) covers the lineup lock: the predicate
+at every boundary (a minute before kickoff, the kickoff millisecond itself, in
+progress, final, BYE, postponed, a feed with no kickoff at all), every feed shape
+(`gameTime_epoch` in seconds or millis, ISO, `gameDate` + `gameTime` in Eastern,
+a Tank01 envelope, a keyed object, our own rows), the kickoff times js/liveData.js
+lifts out of the synced schedule, the manager refusing a swap that touches a
+locked player on *either* side while leaving the lineup untouched, and
+`/api/roster/swap` answering 400 without ever reaching the write.
 
 `tests/draft-sim.test.mjs` drafts all 180 picks — alternating market bot picks and
 simulated clock expiries — prints the board by round, verifies the order, and

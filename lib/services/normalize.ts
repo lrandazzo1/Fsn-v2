@@ -8,6 +8,7 @@
  */
 
 import { CANONICAL_TEAMS, canonicalTeam } from './teams.ts';
+import { normalizeGameStatus, parseKickoff } from '../../js/gameLock.js';
 import type { FantasyPosition, GameStatus, StatLine } from './types.ts';
 
 /** Tank01 (and most RapidAPI feeds) send every stat as a string. */
@@ -143,28 +144,25 @@ export function playerMatchKey(name: unknown, position: unknown): string {
   return `${normalized}|${pos}`;
 }
 
-const GAME_STATUS_ALIASES: Array<[RegExp, GameStatus]> = [
-  [/^(completed|final|closed|f\/ot)/i, 'final'],
-  [/(live|in\s*progress|progress|halftime|q[1-4])/i, 'in_progress'],
-  [/postponed|suspended|delayed/i, 'postponed'],
-  [/cancel/i, 'canceled'],
-  [/scheduled|not\s*started|pre[-\s]?game/i, 'scheduled']
-];
-
+/**
+ * A vendor's status string reduced to one of the five `fsnv2.nfl_matchups`
+ * allows. The alias table lives in js/gameLock.js, because the lineup lock turns
+ * on the same words ("Final", "In Progress") and a second copy here would be a
+ * copy that drifts.
+ */
 export function gameStatus(value: unknown, fallback: GameStatus = 'scheduled'): GameStatus {
-  const raw = text(value);
-  if (!raw) return fallback;
-  for (const [pattern, status] of GAME_STATUS_ALIASES) {
-    if (pattern.test(raw)) return status;
-  }
-  return fallback;
+  return (normalizeGameStatus(value) as GameStatus | null) ?? fallback;
 }
 
 /**
  * Kickoff to ISO-8601 UTC, from whichever of these the feed gave us:
- *   epoch seconds ("1759683600" / 1759683600.0)
+ *   epoch seconds ("1759683600" / 1759683600.0) or millis
  *   an ISO string
  *   Tank01's split fields: gameDate "20251005" + gameTime "1:00p" (US Eastern)
+ *
+ * The parsing itself is `parseKickoff()` in js/gameLock.js — the lineup lock
+ * compares `now` against exactly this instant, so the two must never be able to
+ * read a feed differently.
  */
 export function kickoffIso(input: {
   epoch?: unknown;
@@ -172,51 +170,18 @@ export function kickoffIso(input: {
   date?: unknown;
   time?: unknown;
 }): string | null {
-  const epoch = optionalNum(input.epoch);
-  if (epoch && epoch > 1_000_000_000 && epoch < 10_000_000_000) {
-    return new Date(Math.round(epoch * 1000)).toISOString();
-  }
+  const ms = parseKickoff(input);
+  return ms === null ? null : new Date(ms).toISOString();
+}
 
-  const iso = text(input.iso);
-  if (iso) {
-    const parsed = new Date(iso);
-    if (!Number.isNaN(parsed.getTime())) return parsed.toISOString();
-  }
-
-  const date = text(input.date);
-  if (!date) return null;
-  const compact = /^(\d{4})(\d{2})(\d{2})$/.exec(date);
-  const dashed = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
-  const parts = compact ?? dashed;
-  if (!parts) return null;
-
-  const [, year, month, day] = parts;
-  let hour = 13;
-  let minute = 0;
-  const time = text(input.time);
-  const clock = time ? /^(\d{1,2}):(\d{2})\s*([ap])?/i.exec(time) : null;
-  if (clock) {
-    hour = Number.parseInt(clock[1], 10);
-    minute = Number.parseInt(clock[2], 10);
-    const meridiem = clock[3]?.toLowerCase();
-    if (meridiem === 'p' && hour < 12) hour += 12;
-    if (meridiem === 'a' && hour === 12) hour = 0;
-  }
-
-  // Feeds quote kickoff in US Eastern. EDT (-4) runs through the first week of
-  // November, EST (-5) after it — close enough for a kickoff timestamp, and the
-  // epoch field above is preferred whenever the provider sends one.
-  const monthNum = Number.parseInt(month, 10);
-  const dayNum = Number.parseInt(day, 10);
-  const easternOffset = monthNum > 11 || monthNum < 3 || (monthNum === 11 && dayNum > 7) ? 5 : 4;
-  const utc = Date.UTC(
-    Number.parseInt(year, 10),
-    monthNum - 1,
-    dayNum,
-    hour + easternOffset,
-    minute
-  );
-  return new Date(utc).toISOString();
+/** The same kickoff as epoch millis — what `isPlayerLocked()` compares against. */
+export function kickoffEpoch(input: {
+  epoch?: unknown;
+  iso?: unknown;
+  date?: unknown;
+  time?: unknown;
+}): number | null {
+  return parseKickoff(input);
 }
 
 export interface FlattenOptions {

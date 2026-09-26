@@ -7,6 +7,7 @@
  *   fsnv2_players       -> a draft pool, same shape as playerData.loadPlayers()
  *   fsnv2_projections   -> week -> player -> real Tank01 fantasy points
  *   fsnv2_nfl_schedule  -> week -> team  -> { opponent, home }
+ *                       -> week -> games  (kickoff + status, for the lineup lock)
  *
  * Nothing here talks to the network; persistence.js does the fetching and hands
  * the three row sets over. That keeps this module pure and testable, and means
@@ -30,6 +31,8 @@
  * keep a fourth copy.
  */
 import { normalizeAbbr as teamAbbr } from './nflTeams.js';
+/** The lineup lock's kickoff and status readers — one parser, every layer. */
+import { gameStartTimestamp, gameStatusOf } from './gameLock.js';
 /** Imagery is resolved in one place too — see js/playerAssets.js. */
 import { espnIdFor, headshotUrlFor } from './playerAssets.js';
 
@@ -199,7 +202,24 @@ function readGame(row) {
   const week = weekOf(row.week ?? row.gameWeek);
 
   if (!home || !away || home === away || !Number.isFinite(week)) return null;
-  return { week, home, away };
+  // `kickoff` and `status` are what the lineup lock turns on — a roster slot
+  // stops being movable the moment its player's game starts. `gameStartTimestamp`
+  // reads whichever of the vendor spellings this row happens to carry.
+  const kickoff = gameStartTimestamp(row);
+  return {
+    week,
+    home,
+    away,
+    kickoff,
+    // The provider's own name for the same number, so a game object out of here
+    // reads the same as one straight off the feed.
+    gameTimeEpoch: kickoff,
+    status: gameStatusOf(row),
+    gameStatus: gameStatusOf(row),
+    // Kept so the lock reads this object exactly as it reads a raw feed.
+    home_team: home,
+    away_team: away
+  };
 }
 
 /**
@@ -229,6 +249,31 @@ export function buildLiveSlate(rows) {
   return byWeek;
 }
 
+/**
+ * week -> the week's games, each carrying its kickoff and status.
+ *
+ * The slate above answers "who does this team play"; this answers "and has it
+ * started". They are built from the same rows and deliberately kept apart: the
+ * opponent labels are needed for every week on screen, the kickoffs only by the
+ * lock.
+ *
+ * @param {Array<Object>} rows fsnv2_nfl_schedule output, or raw Tank01 games
+ * @returns {Map<number, Array<Object>>}
+ */
+export function buildLiveGames(rows) {
+  /** @type {Map<number, Array<Object>>} */
+  const byWeek = new Map();
+  if (!Array.isArray(rows)) return byWeek;
+
+  for (const row of rows) {
+    const game = readGame(row);
+    if (!game) continue;
+    if (!byWeek.has(game.week)) byWeek.set(game.week, []);
+    byWeek.get(game.week).push(game);
+  }
+  return byWeek;
+}
+
 /* ------------------------------------------------------------------ facade -- */
 
 /**
@@ -238,6 +283,7 @@ export function buildLiveSlate(rows) {
  * @property {(player: Object, week: number) => number|null} weeklyPoints
  * @property {number[]} projectionWeeks weeks the provider actually covers
  * @property {number[]} scheduleWeeks
+ * @property {Map<number, Array<Object>>} gamesByWeek kickoffs + statuses, for the lock
  * @property {{players: number, projections: number, games: number}} counts
  */
 
@@ -251,10 +297,12 @@ export function createLiveData({ players = [], projections = [], schedule = [] }
   const pool = buildLivePool(players);
   const projectionIndex = buildProjectionIndex(projections);
   const slate = buildLiveSlate(schedule);
+  const gamesByWeek = buildLiveGames(schedule);
 
   return {
     pool,
     slate,
+    gamesByWeek,
 
     /**
      * Real projected points for a player in a week, or null when the provider

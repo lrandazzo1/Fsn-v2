@@ -608,6 +608,19 @@ kbd {
 .roster-slot.is-selected { border: 2px solid #10b981; background: rgba(6, 78, 59, .22); box-shadow: 0 0 12px rgba(16, 185, 129, .22); }
 .roster-slot.is-target { border: 2px dashed rgba(52, 211, 153, .55); background: rgba(6, 78, 59, .09); }
 .roster-slot.is-invalid { animation: lineup-shake .24s ease-in-out; }
+
+/* Locked: the player's game has kicked off, so the slot is frozen for the week.
+   Dimmed, never a hover affordance, never a drop target — the 🔒 and its
+   tooltip carry the reason, and a click gets the same sentence as a toast. */
+.roster-slot.is-locked {
+  cursor: not-allowed;
+  background: rgba(148, 163, 184, .06);
+  border-color: rgba(148, 163, 184, .18);
+}
+.roster-slot.is-locked:hover, .roster-slot.is-locked:focus-visible { border-color: rgba(148, 163, 184, .28); }
+.roster-slot.is-locked .roster-slot__name, .roster-slot.is-locked .roster-slot__pts { color: var(--text-dim); }
+.roster-slot.is-locked .roster-slot__label { color: rgba(100, 116, 139, .8); }
+.roster-slot__lock { font-size: 10.5px; line-height: 1; flex: none; cursor: help; filter: grayscale(.25); }
 @keyframes lineup-shake { 25%, 75% { transform: translateX(-3px); } 50% { transform: translateX(3px); } }
 @media (prefers-reduced-motion: reduce) { .roster-slot.is-invalid { animation: none; } }
 .roster-slot__label {

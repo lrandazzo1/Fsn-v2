@@ -6,6 +6,11 @@
  * (js/views/matchup.js); what is left here is the summary card that links to
  * it, driven by the same `ui.week` so the two screens never disagree about
  * which week is being looked at.
+ *
+ * This is also where the lineup is set: click a player, click a slot. A player
+ * whose NFL game has already kicked off wears a 🔒, cannot be picked up or
+ * swapped into, and says why if you try — see js/gameLock.js for the rule and
+ * js/lineup.js for the manager that enforces it.
  */
 
 import { annotatePlayers, playerOpponentLabel } from '../nflTeams.js';
@@ -43,6 +48,10 @@ export function createTeamView({ engine, season, ui, router, persistLineup, onWe
   const lineup = createLineup({
     engine, teamId: engine.userTeamId, persist: persistLineup,
     notify: toast,
+    // The locks follow the week on screen: a player is frozen once *that*
+    // week's game has kicked off, so the selector moving changes which rows
+    // wear a 🔒.
+    week: () => ui.week || 1,
     onChange: (invalidSlot) => {
       render();
       if (invalidSlot) {
@@ -104,7 +113,16 @@ export function createTeamView({ engine, season, ui, router, persistLineup, onWe
       tile('gauge', 'Total VOR', formatVor(engine.starterVor(teamId)), `${team.roster.length}/${engine.rounds} rostered · ${filled}/${starterCount} starters`)
     ].join('');
 
-    el.starterChip.textContent = `${filled}/${starterCount} filled`;
+    // How much of this roster is already frozen for the week.
+    const lockedCount = team.isUser
+      ? ROSTER_SLOTS.filter((slot) => lineup.lockedSlot(slot.key)).length
+      : 0;
+    el.starterChip.textContent = lockedCount
+      ? `${filled}/${starterCount} filled · ${lockedCount} 🔒`
+      : `${filled}/${starterCount} filled`;
+    el.starterChip.title = lockedCount
+      ? `${lockedCount} player${lockedCount === 1 ? '' : 's'} locked — their week ${week} game has started.`
+      : `Week ${week}: no games have started yet, so the whole roster is movable.`;
     renderSlots(el.starters, engine, teamId, 'starters', week, team.isUser ? lineup : null);
     renderSlots(el.bench, engine, teamId, 'bench', week, team.isUser ? lineup : null);
 

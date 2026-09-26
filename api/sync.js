@@ -234,9 +234,9 @@ var TEAM_ALIASES = {
 var FREE_AGENT_CODES = /* @__PURE__ */ new Set(["FA", "FREE", "NONE", "NA", "N/A", "UFA", "RFA", "RET", "00", "0"]);
 var NAME_INDEX = (() => {
   const index = {};
-  const put = (label, abbr) => {
+  const put = (label, abbr2) => {
     const key = label.toUpperCase().replace(/[^A-Z0-9]/g, "");
-    if (key) index[key] = abbr;
+    if (key) index[key] = abbr2;
   };
   for (const team of Object.values(NFL_FRANCHISES)) {
     put(team.nickname, team.abbr);
@@ -270,6 +270,118 @@ function espnHeadshotUrl(espnId) {
   if (!/^\d+$/.test(id)) return null;
   return `https://a.espncdn.com/combiner/i?img=/i/headshots/nfl/players/full/${id}.png`;
 }
+
+// js/gameLock.js
+var STATUS_ALIASES = [
+  [/^(completed|complete|final|closed|post[-_\s]?game|f\/ot)/i, "final"],
+  [/(live|in\s*progress|progress|halftime|q[1-4]|\d+(st|nd|rd|th)\s*quarter)/i, "in_progress"],
+  [/postponed|suspended|delayed/i, "postponed"],
+  [/cancel/i, "canceled"],
+  [/scheduled|not\s*started|pre[-_\s]?game|upcoming|^pre$/i, "scheduled"]
+];
+function normalizeGameStatus(value) {
+  const raw = typeof value === "string" ? value.trim() : typeof value === "number" ? String(value) : "";
+  if (!raw) return null;
+  for (const [pattern, status] of STATUS_ALIASES) {
+    if (pattern.test(raw)) return status;
+  }
+  return null;
+}
+function epochMs(value) {
+  const raw = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number.parseFloat(value.trim()) : Number.NaN;
+  if (!Number.isFinite(raw) || raw <= 0) return null;
+  if (raw >= 1e9 && raw < 1e10) return Math.round(raw * 1e3);
+  if (raw >= 1e12 && raw < 1e13) return Math.round(raw);
+  return null;
+}
+function easternOffsetHours(month, day) {
+  return month > 11 || month < 3 || month === 11 && day > 7 ? 5 : 4;
+}
+function parseKickoff({ epoch, iso, date, time } = {}) {
+  const fromEpoch = epochMs(epoch);
+  if (fromEpoch !== null) return fromEpoch;
+  if (typeof iso === "string" && iso.trim() !== "") {
+    const parsed = new Date(iso.trim());
+    if (!Number.isNaN(parsed.getTime())) return parsed.getTime();
+  }
+  const day = typeof date === "string" ? date.trim() : typeof date === "number" ? String(date) : "";
+  if (!day) return null;
+  const parts = /^(\d{4})(\d{2})(\d{2})$/.exec(day) ?? /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  if (!parts) return null;
+  const year = Number.parseInt(parts[1], 10);
+  const month = Number.parseInt(parts[2], 10);
+  const dayNum = Number.parseInt(parts[3], 10);
+  let hour = 13;
+  let minute = 0;
+  const clock = typeof time === "string" ? /^(\d{1,2}):(\d{2})\s*([ap])?/i.exec(time.trim()) : null;
+  if (clock) {
+    hour = Number.parseInt(clock[1], 10);
+    minute = Number.parseInt(clock[2], 10);
+    const meridiem = clock[3]?.toLowerCase();
+    if (meridiem === "p" && hour < 12) hour += 12;
+    if (meridiem === "a" && hour === 12) hour = 0;
+  }
+  return Date.UTC(year, month - 1, dayNum, hour + easternOffsetHours(month, dayNum), minute);
+}
+var NO_TEAM = /* @__PURE__ */ new Set(["", "FA", "BYE", "NONE", "NULL", "UNDEFINED"]);
+function abbr(value) {
+  if (typeof value !== "string") return null;
+  const upper = value.trim().toUpperCase();
+  return NO_TEAM.has(upper) ? null : upper;
+}
+function gameTeams(game) {
+  if (!game || typeof game !== "object") return [];
+  const home = abbr(game.home ?? game.home_team ?? game.homeTeam ?? game.teamAbvHome);
+  const away = abbr(game.away ?? game.away_team ?? game.awayTeam ?? game.teamAbvAway);
+  const fromId = home && away ? [] : teamsFromGameId(game.gameID ?? game.game_id ?? game.external_id);
+  return [home ?? fromId[0] ?? null, away ?? fromId[1] ?? null].filter(
+    (value) => value !== null
+  );
+}
+function teamsFromGameId(value) {
+  if (typeof value !== "string") return [];
+  const match = /_([A-Z]{2,4})@([A-Z]{2,4})$/.exec(value.trim().toUpperCase());
+  return match ? [match[2], match[1]] : [];
+}
+function normalizeGames(payload) {
+  if (!payload) return [];
+  if (Array.isArray(payload)) return payload.filter((game) => game && typeof game === "object");
+  if (typeof payload !== "object") return [];
+  const source = (
+    /** @type {Record<string, any>} */
+    payload
+  );
+  if (Array.isArray(source.games)) return normalizeGames(source.games);
+  if (Array.isArray(source.body)) return normalizeGames(source.body);
+  if (Array.isArray(source.matchups)) return normalizeGames(source.matchups);
+  if (Array.isArray(source.schedule)) return normalizeGames(source.schedule);
+  const values = Object.values(source);
+  if (values.length > 0 && values.every((value) => value && typeof value === "object")) {
+    return (
+      /** @type {Array<Record<string, any>>} */
+      values
+    );
+  }
+  return [];
+}
+function buildGameSchedule(payload) {
+  if (payload && typeof payload === "object" && /** @type {any} */
+  payload.isGameSchedule) {
+    return (
+      /** @type {any} */
+      payload
+    );
+  }
+  const games = normalizeGames(payload);
+  const byTeam = /* @__PURE__ */ new Map();
+  games.forEach((game) => {
+    gameTeams(game).forEach((team) => {
+      if (!byTeam.has(team)) byTeam.set(team, game);
+    });
+  });
+  return { games, byTeam, isGameSchedule: true };
+}
+var EMPTY_SCHEDULE = buildGameSchedule([]);
 
 // lib/services/normalize.ts
 function num(value, fallback = 0) {
@@ -320,60 +432,12 @@ var NFL_TEAM_ABBRS = new Set(CANONICAL_TEAMS);
 function knownTeamAbbr(value) {
   return canonicalTeam(value);
 }
-var GAME_STATUS_ALIASES = [
-  [/^(completed|final|closed|f\/ot)/i, "final"],
-  [/(live|in\s*progress|progress|halftime|q[1-4])/i, "in_progress"],
-  [/postponed|suspended|delayed/i, "postponed"],
-  [/cancel/i, "canceled"],
-  [/scheduled|not\s*started|pre[-\s]?game/i, "scheduled"]
-];
 function gameStatus(value, fallback = "scheduled") {
-  const raw = text(value);
-  if (!raw) return fallback;
-  for (const [pattern, status] of GAME_STATUS_ALIASES) {
-    if (pattern.test(raw)) return status;
-  }
-  return fallback;
+  return normalizeGameStatus(value) ?? fallback;
 }
 function kickoffIso(input) {
-  const epoch = optionalNum(input.epoch);
-  if (epoch && epoch > 1e9 && epoch < 1e10) {
-    return new Date(Math.round(epoch * 1e3)).toISOString();
-  }
-  const iso = text(input.iso);
-  if (iso) {
-    const parsed = new Date(iso);
-    if (!Number.isNaN(parsed.getTime())) return parsed.toISOString();
-  }
-  const date = text(input.date);
-  if (!date) return null;
-  const compact = /^(\d{4})(\d{2})(\d{2})$/.exec(date);
-  const dashed = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
-  const parts = compact ?? dashed;
-  if (!parts) return null;
-  const [, year, month, day] = parts;
-  let hour = 13;
-  let minute = 0;
-  const time = text(input.time);
-  const clock = time ? /^(\d{1,2}):(\d{2})\s*([ap])?/i.exec(time) : null;
-  if (clock) {
-    hour = Number.parseInt(clock[1], 10);
-    minute = Number.parseInt(clock[2], 10);
-    const meridiem = clock[3]?.toLowerCase();
-    if (meridiem === "p" && hour < 12) hour += 12;
-    if (meridiem === "a" && hour === 12) hour = 0;
-  }
-  const monthNum = Number.parseInt(month, 10);
-  const dayNum = Number.parseInt(day, 10);
-  const easternOffset = monthNum > 11 || monthNum < 3 || monthNum === 11 && dayNum > 7 ? 5 : 4;
-  const utc = Date.UTC(
-    Number.parseInt(year, 10),
-    monthNum - 1,
-    dayNum,
-    hour + easternOffset,
-    minute
-  );
-  return new Date(utc).toISOString();
+  const ms = parseKickoff(input);
+  return ms === null ? null : new Date(ms).toISOString();
 }
 function flattenStats(input, prefix = "", options = {}) {
   const out = {};
@@ -666,7 +730,7 @@ function byeWeek(value, season) {
   if (Array.isArray(candidate)) return optionalNum(candidate[0]);
   return optionalNum(candidate);
 }
-function teamsFromGameId(gameId) {
+function teamsFromGameId2(gameId) {
   if (!gameId) return { away: null, home: null };
   const match = /_([A-Z]{2,4})@([A-Z]{2,4})$/.exec(gameId.toUpperCase());
   return match ? { away: match[1], home: match[2] } : { away: null, home: null };
@@ -717,9 +781,9 @@ function createTank01Provider(options) {
         teamStats: "false"
       });
       for (const row of asRecords(body)) {
-        const abbr = knownTeamAbbr(row.teamAbv ?? row.abbreviation ?? row.__key);
+        const abbr2 = knownTeamAbbr(row.teamAbv ?? row.abbreviation ?? row.__key);
         const id = text(row.teamID) ?? text(row.__key);
-        if (abbr && id) index.set(id, abbr);
+        if (abbr2 && id) index.set(id, abbr2);
       }
     } catch (error) {
       logger.warn("could not build the teamID dictionary", {
@@ -747,11 +811,11 @@ function createTank01Provider(options) {
     });
     return asRecords(body).map((row) => {
       const externalId = text(row.teamID) ?? text(row.__key);
-      const abbr = knownTeamAbbr(row.teamAbv ?? row.abbreviation);
-      if (!externalId || !abbr) return null;
+      const abbr2 = knownTeamAbbr(row.teamAbv ?? row.abbreviation);
+      if (!externalId || !abbr2) return null;
       return {
         external_id: externalId,
-        abbr,
+        abbr: abbr2,
         city: text(row.teamCity),
         name: text(row.teamName),
         conference: text(row.conference) ?? text(row.conferenceAbv),
@@ -823,18 +887,18 @@ function createTank01Provider(options) {
     const seen = /* @__PURE__ */ new Set();
     const index = /* @__PURE__ */ new Map();
     for (const team of teams) {
-      const abbr = knownTeamAbbr(team.teamAbv);
+      const abbr2 = knownTeamAbbr(team.teamAbv);
       const id = text(team.teamID);
-      if (abbr && id) index.set(id, abbr);
+      if (abbr2 && id) index.set(id, abbr2);
     }
     if (index.size > 0) teamIndex = index;
     for (const team of teams) {
-      const abbr = knownTeamAbbr(team.teamAbv);
+      const abbr2 = knownTeamAbbr(team.teamAbv);
       const teamId = text(team.teamID);
       const bye = byeWeek(team.byeWeeks, context.season);
       const roster = team.Roster ?? team.roster;
       for (const entry of asRecords(roster)) {
-        const player = mapRosterPlayer(entry, index, abbr, teamId, bye);
+        const player = mapRosterPlayer(entry, index, abbr2, teamId, bye);
         if (!player || seen.has(player.external_id)) continue;
         seen.add(player.external_id);
         players.push(player);
@@ -895,8 +959,8 @@ function createTank01Provider(options) {
       });
     }
     for (const entry of asRecords(envelope.teamDefenseProjections)) {
-      const abbr = defenseTeamAbbr(entry, index);
-      if (!abbr) {
+      const abbr2 = defenseTeamAbbr(entry, index);
+      if (!abbr2) {
         logger.warn("skipping a team defense projection with no resolvable team", {
           key: text(entry.__key)
         });
@@ -906,11 +970,11 @@ function createTank01Provider(options) {
       const provided = fantasyPointsOf(entry, context.scoringFormat);
       rows.push({
         ...base,
-        external_player_id: `DST-${abbr}`,
+        external_player_id: `DST-${abbr2}`,
         player_id: null,
-        name: `${abbr} D/ST`,
+        name: `${abbr2} D/ST`,
         position: "DST",
-        team: abbr,
+        team: abbr2,
         opponent: knownTeamAbbr(entry.opponent),
         fantasy_points: provided || (defenseFantasyPoints(entry) ?? 0),
         stats,
@@ -922,7 +986,7 @@ function createTank01Provider(options) {
   function mapGame(row, context, week) {
     const externalId = text(row.gameID) ?? text(row.__key);
     if (!externalId) return null;
-    const fromId = teamsFromGameId(externalId);
+    const fromId = teamsFromGameId2(externalId);
     const index = teamIndex ?? /* @__PURE__ */ new Map();
     const home = knownTeamAbbr(row.home ?? row.homeTeam) ?? knownTeamAbbr(fromId.home) ?? index.get(text(row.teamIDHome) ?? "") ?? null;
     const away = knownTeamAbbr(row.away ?? row.awayTeam) ?? knownTeamAbbr(fromId.away) ?? index.get(text(row.teamIDAway) ?? "") ?? null;
@@ -1031,9 +1095,9 @@ function createTank01Provider(options) {
       for (const entry of asRecords(envelope.DST)) {
         const key = text(entry.__key) ?? "";
         const keyed = /^home$/i.test(key) ? game.home_team : /^away$/i.test(key) ? game.away_team : null;
-        const abbr = defenseTeamAbbr(entry, index) ?? knownTeamAbbr(keyed);
-        if (!abbr) continue;
-        const externalId = `DST-${abbr}`;
+        const abbr2 = defenseTeamAbbr(entry, index) ?? knownTeamAbbr(keyed);
+        if (!abbr2) continue;
+        const externalId = `DST-${abbr2}`;
         if (seen.has(externalId)) continue;
         seen.add(externalId);
         const stats = statsOf(entry);
@@ -1045,10 +1109,10 @@ function createTank01Provider(options) {
           week,
           season_type: context.seasonType,
           game_external_id: game.external_id,
-          name: `${abbr} D/ST`,
+          name: `${abbr2} D/ST`,
           position: "DST",
-          team: abbr,
-          opponent: abbr === knownTeamAbbr(game.home_team) ? game.away_team : game.home_team,
+          team: abbr2,
+          opponent: abbr2 === knownTeamAbbr(game.home_team) ? game.away_team : game.home_team,
           fantasy_points: provided || (defenseFantasyPoints(entry) ?? 0),
           stats,
           snap_counts: {},
