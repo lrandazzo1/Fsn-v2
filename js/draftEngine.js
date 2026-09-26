@@ -29,7 +29,10 @@ import {
   createRosterSlots,
   createTeam
 } from './types.js';
-import { draftValue, enrichPlayers, recommendPlayers } from './vorMath.js';
+import { enrichPlayers, recommendPlayers } from './vorMath.js';
+import { compareMarket } from './sleeperMarket.js';
+import { mapSleeperMarket } from './sleeperMarket.js';
+import { sleeperRanksSnapshot } from './sleeperRanksSnapshot.js';
 import { loadPlayers } from './playerData.js';
 import { PickTimer } from './draftTimer.js';
 
@@ -81,6 +84,7 @@ export function snakePickNumber(round, teamId, totalTeams, draftType = 'snake') 
 const DEFAULTS = {
   teamCount: 12,
   rounds: 15,
+  scoringType: 'ppr',
   userTeamId: 1,
   /** 'snake' reverses every even round; 'linear' keeps 1 -> N every round. */
   draftType: 'snake',
@@ -88,8 +92,8 @@ const DEFAULTS = {
   timerSeconds: 60,
   /** Start the clock automatically as soon as the draft begins. */
   autoStartClock: false,
-  /** Higher = more chaotic bots. 0 = always takes the top board value. */
-  botRandomness: 0.18,
+  /** Allow a second early QB in leagues with two quarterback slots. */
+  superflex: false,
   /** Injected into PickTimer so tests can drive the clock synchronously. */
   scheduler: undefined
 };
@@ -143,7 +147,8 @@ export class DraftEngine {
 
     this.clock.stop();
 
-    const pool = enrichPlayers(players ? clonePlayers(players) : loadPlayers(), teamCount);
+    const pool = enrichPlayers(players ? clonePlayers(players) :
+      mapSleeperMarket(loadPlayers(), sleeperRanksSnapshot, this.config.scoringType), teamCount);
 
     /** @type {Record<string, import('./types.js').Player>} */
     this.playersById = {};
@@ -346,15 +351,26 @@ export class DraftEngine {
    * @param {number} [teamId] defaults to the team on the clock
    */
   bestAvailableByAdp(teamId = this.currentTeamId) {
-    const available = this.availablePlayers.sort((a, b) => a.adp - b.adp);
+    const available = this.availablePlayers.sort(compareMarket);
     if (available.length === 0) return null;
     const counts = this.positionCounts(teamId);
     const fits = available.find(
       (player) =>
         counts[player.position] < POSITION_LIMITS[player.position] &&
+        !this.earlyPositionBlocked(player, counts) &&
         this.findOpenSlot(teamId, player.position)
     );
-    return fits || available.find((player) => this.findOpenSlot(teamId, player.position)) || null;
+    return fits || available.find((player) =>
+      counts[player.position] < POSITION_LIMITS[player.position] && this.findOpenSlot(teamId, player.position)
+    ) || null;
+  }
+
+  earlyPositionBlocked(player, counts) {
+    if (this.currentRound > 7) return false;
+    if ((player.position === 'QB' && !this.config.superflex) || player.position === 'TE') {
+      return counts[player.position] >= 1;
+    }
+    return player.position === 'K' || player.position === 'DST';
   }
 
   // -------------------------------------------------------------- roster math
@@ -533,44 +549,22 @@ export class DraftEngine {
   }
 
   /**
-   * Bot selection: board value + roster need + a dash of randomness so two
-   * simulations never look identical.
+   * Bot selection uses the same market order as clock expiry and the board.
    * @returns {import('./types.js').Player|null}
    */
   botSelection(teamId = this.currentTeamId) {
-    const weights = this.needWeights(teamId);
-    const roster = this.rosters[teamId];
-    const rosterFull = Object.values(roster).every((slot) => slot !== null);
-    if (rosterFull) return null;
-
-    const spread = this.config.botRandomness * 40;
-    let best = null;
-    let bestScore = -Infinity;
-
-    this.availablePlayers.forEach((player) => {
-      const weight = weights[player.position];
-      if (weight <= -900) return; // position capped
-      if (!this.findOpenSlot(teamId, player.position)) return;
-
-      const score = draftValue(player) + weight + (Math.random() - 0.5) * spread;
-      if (score > bestScore) {
-        bestScore = score;
-        best = player;
-      }
-    });
-
-    return best;
+    return this.bestAvailableByAdp(teamId);
   }
 
   /**
    * Makes one automated pick for whoever is on the clock.
-   * @param {{strategy?: 'vor'|'adp', source?: string}} [options]
+   * @param {{source?: string}} [options]
    */
-  autoPick({ strategy = 'vor', source } = {}) {
+  autoPick({ source } = {}) {
     if (this.complete) return null;
-    const player = strategy === 'adp' ? this.bestAvailableByAdp() : this.botSelection();
+    const player = this.botSelection();
     if (!player) return null;
-    return this.makePick(player.id, { auto: true, source: source || (strategy === 'adp' ? 'timer_expiry' : 'bot') });
+    return this.makePick(player.id, { auto: true, source: source || 'bot' });
   }
 
   /**
@@ -614,7 +608,9 @@ export class DraftEngine {
   recommendations(teamId = this.currentTeamId, limit = 5) {
     const weights = this.needWeights(teamId);
     const eligible = this.availablePlayers.filter(
-      (player) => weights[player.position] > -900 && this.findOpenSlot(teamId, player.position)
+      (player) => weights[player.position] > -900 &&
+        !this.earlyPositionBlocked(player, this.positionCounts(teamId)) &&
+        this.findOpenSlot(teamId, player.position)
     );
     return recommendPlayers(eligible, weights, limit);
   }

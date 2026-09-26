@@ -12,7 +12,8 @@
 import { hasLiveSlate, normalizeAbbr, playerOpponentLabel, teamLogoHtml } from './nflTeams.js';
 import { POSITIONS, ROSTER_SLOTS } from './types.js';
 import { avatarSources } from './playerAssets.js';
-import { positionalScarcity } from './vorMath.js';
+import { positionalScarcity, valueDelta } from './vorMath.js';
+import { compareMarket, marketRank } from './sleeperMarket.js';
 
 /** Cached element lookups. */
 export const dom = {};
@@ -22,7 +23,7 @@ export function cacheDom() {
   const ids = [
     'onClockTeam', 'onClockMeta', 'clockEyebrow', 'roundLabel', 'pickLabel', 'progressBar',
     'progressText', 'draftBoard', 'playerPool', 'poolCount', 'playerSearch', 'positionFilters',
-    'sortSelect', 'rosterTeamSelect', 'rosterSlots', 'rosterNeeds', 'recommendations',
+    'rosterTeamSelect', 'rosterSlots', 'rosterNeeds', 'recommendations',
     'recentPicks', 'selectionName', 'selectionMeta', 'btnMakePick', 'btnAutoPick', 'btnSimRound',
     'btnSimToMe', 'btnUndo', 'btnReset', 'toggleAutoDraft', 'toast', 'scarcityList',
     'hideDraftedWrap', 'boardStatus', 'clockTime', 'clockRing', 'pickClock', 'btnClockToggle',
@@ -285,13 +286,7 @@ export function filterPool(engine, ui) {
     );
   }
 
-  const sorters = {
-    vor: (a, b) => b.vor - a.vor,
-    adp: (a, b) => a.adp - b.adp,
-    projection: (a, b) => b.projection - a.projection,
-    name: (a, b) => a.name.localeCompare(b.name)
-  };
-  return players.sort(sorters[ui.sort] || sorters.vor);
+  return players.sort(compareMarket);
 }
 
 export function renderPool(engine, ui) {
@@ -300,6 +295,7 @@ export function renderPool(engine, ui) {
   const frag = document.createDocumentFragment();
 
   visible.forEach((player) => {
+    const delta = valueDelta(player);
     const row = document.createElement('button');
     row.type = 'button';
     row.className = 'player-row';
@@ -315,10 +311,10 @@ export function renderPool(engine, ui) {
       ${badge(player.position)}
       <span class="player-row__main">
         <span class="player-row__name">${escapeHtml(player.name)}</span>
-        <span class="player-row__meta">${escapeHtml(normalizeAbbr(player.team))} · ${player.position}${player.posRank} · Tier ${player.tier} · ADP ${player.adp}</span>
+        <span class="player-row__meta">${escapeHtml(normalizeAbbr(player.team))} · ${player.position}${player.posRank} · Tier ${player.tier} · ${player.sleeperAdp ? 'ADP' : 'Sleeper rank'} ${player.adp === 999 ? '—' : player.adp}</span>
       </span>
       <span class="player-row__stats">
-        <span class="player-row__vor ${player.vor >= 0 ? 'is-pos' : 'is-neg'}">${formatVor(player.vor)}</span>
+        <span class="player-row__vor ${engine.currentPick - marketRank(player) >= 10 ? 'is-pos' : 'is-neg'}" title="Market rank minus projected VOR rank">Value ${delta === null ? '—' : `${delta >= 0 ? '+' : ''}${delta}`}</span>
         <span class="player-row__proj">${player.projection} pts</span>
       </span>
       ${owner ? `<span class="player-row__owner">${owner}</span>` : ''}`;
@@ -445,7 +441,7 @@ export function renderRecommendations(engine, ui) {
       <span class="rec-row__rank">${index + 1}</span>
       ${badge(player.position, true)}
       <span class="rec-row__name">${escapeHtml(player.name)}</span>
-      <span class="rec-row__score">${formatVor(score)}</span>`;
+      <span class="rec-row__score" title="Market rank minus projected VOR rank">${score === null ? '—' : `${score >= 0 ? '+' : ''}${score}`}</span>`;
     frag.appendChild(row);
   });
 

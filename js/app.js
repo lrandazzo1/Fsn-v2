@@ -17,6 +17,9 @@ import { CONFIG } from './config.js';
 import { DraftEngine } from './draftEngine.js';
 import { createLiveData } from './liveData.js';
 import { annotatePlayers, liveSlateWeeks, setLiveSlate } from './nflTeams.js';
+import { loadPlayers } from './playerData.js';
+import { mapSleeperMarket } from './sleeperMarket.js';
+import { sleeperRanksSnapshot } from './sleeperRanksSnapshot.js';
 import { DraftRepository, SeasonRepository } from './persistence.js';
 import { Router } from './router.js';
 import { SeasonEngine } from './seasonEngine.js';
@@ -40,7 +43,6 @@ import { createTeamView } from './views/team.js';
 const ui = {
   search: '',
   position: 'ALL',
-  sort: 'vor',
   hideDrafted: true,
   poolLimit: 120,
   selectedTeamId: CONFIG.league.userTeamId,
@@ -57,6 +59,7 @@ const ui = {
 const engine = new DraftEngine({
   teamCount: CONFIG.league.totalTeams,
   rounds: CONFIG.league.rounds,
+  scoringType: CONFIG.league.scoringType,
   userTeamId: CONFIG.league.userTeamId,
   timerSeconds: CONFIG.league.timerSeconds
 });
@@ -74,6 +77,7 @@ const seasonRepo = new SeasonRepository(repo);
 let simulation = { running: false, cancel: false };
 let views = {};
 let router = null;
+let marketRanks = sleeperRanksSnapshot;
 
 /* --------------------------------------------------------------------- boot */
 
@@ -124,11 +128,23 @@ async function init() {
   router.start();
   renderAll(engine, ui);
 
+  await loadMarketRanks();
   // Before any picks exist: swapping the pool resets the board.
   await loadLiveData();
 
   await restoreDraft();
   await restoreSeason();
+}
+
+/** Refresh the offline board before loading the database's live player pool. */
+async function loadMarketRanks() {
+  try {
+    const response = await fetch('/api/draft-ranks', { signal: AbortSignal.timeout(18000) });
+    if (response.ok) marketRanks = await response.json();
+  } catch (error) {
+    console.warn('Using saved Sleeper rankings:', error);
+  }
+  engine.usePlayerPool(mapSleeperMarket(loadPlayers(), marketRanks, CONFIG.league.scoringType));
 }
 
 /**
@@ -164,7 +180,9 @@ async function loadLiveData() {
 
   const live = createLiveData(bundle);
 
-  if (live.pool.length) engine.usePlayerPool(live.pool);
+  if (live.pool.length) {
+    engine.usePlayerPool(mapSleeperMarket(live.pool, marketRanks, CONFIG.league.scoringType));
+  }
   if (live.slate.size) setLiveSlate(live.slate);
   if (live.projectionWeeks.length) {
     season.setLiveProjections((player, week) => live.weeklyPoints(player, week));
@@ -279,7 +297,7 @@ function onClockExpiry({ pick }) {
   if (!pick) return;
   const player = engine.playersById[pick.playerId];
   const team = engine.teamById(pick.teamId);
-  toast(`⏱ Clock expired — ${team.abbr} auto-drafted ${player.name} (ADP ${player.adp}).`, 'warn');
+  toast(`⏱ Clock expired — ${team.abbr} auto-drafted ${player.name} (market rank ${player.adp}).`, 'warn');
   // If the clock ran out on the user, let the bots run back to their next pick.
   if (pick.teamId === engine.userTeamId) runSimulation({ mode: 'toUser' });
 }
@@ -418,11 +436,6 @@ function bindEvents() {
     const button = event.target.closest('[data-position]');
     if (!button) return;
     ui.position = button.dataset.position;
-    renderAll(engine, ui);
-  });
-
-  dom.sortSelect.addEventListener('change', (event) => {
-    ui.sort = event.target.value;
     renderAll(engine, ui);
   });
 

@@ -21,6 +21,7 @@
  */
 
 import { CONFIG } from './config.js';
+import { valueDelta } from './vorMath.js';
 
 const hasLocalStorage = (() => {
   try {
@@ -144,7 +145,11 @@ export class DraftRepository {
         vor: player.vor,
         tier: player.tier,
         pos_rank: player.posRank,
-        vor_rank: player.vorRank
+        vor_rank: player.vorRank,
+        sleeper_id: player.sleeperId,
+        sleeper_adp: player.sleeperAdp,
+        search_rank: player.searchRank,
+        value_delta: valueDelta(player)
       }
     }));
 

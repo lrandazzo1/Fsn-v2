@@ -25,9 +25,13 @@ import { fileURLToPath } from 'node:url';
 import { DraftEngine } from '../js/draftEngine.js';
 import { DraftRepository } from '../js/persistence.js';
 import { CONFIG } from '../js/config.js';
+import { loadPlayers } from '../js/playerData.js';
+import { sleeperRanksSnapshot } from '../js/sleeperRanksSnapshot.js';
+import { mapSleeperMarket } from '../js/sleeperMarket.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WANT_DB = process.argv.includes('--db');
+const marketPlayers = mapSleeperMarket(loadPlayers(), sleeperRanksSnapshot, CONFIG.league.scoringType);
 
 const results = [];
 function test(name, fn) {
@@ -50,16 +54,16 @@ const engine = new DraftEngine({
   rounds: CONFIG.league.rounds,
   userTeamId: CONFIG.league.userTeamId,
   timerSeconds: CONFIG.league.timerSeconds,
-  scheduler: { setInterval: () => 1, clearInterval: () => {} }
+  scheduler: { setInterval: () => 1, clearInterval: () => {} },
+  players: marketPlayers
 });
 engine.autoDraftUser = true;
 
-// Alternate the two auto-pick paths so both are exercised end to end:
-// even picks use the VOR bot, odd picks simulate a pick-clock expiry (ADP).
+// Alternate timer expiry and bot picks; both must use the same Sleeper market order.
 engine.startClock();
 while (!engine.complete) {
   if (engine.currentPick % 2 === 1) engine.clock.expireNow();
-  else engine.autoPick({ strategy: 'vor', source: 'simulation' });
+  else engine.autoPick({ source: 'simulation' });
 }
 
 const snapshot = engine.toJSON();
@@ -101,7 +105,7 @@ test('timer-expiry picks took the best available ADP', () => {
   const expiries = snapshot.picks.filter((pick) => pick.source === 'timer_expiry');
   assert.ok(expiries.length >= 89, `expected ~90 expiry picks, got ${expiries.length}`);
   // Replay the board and confirm each expiry pick was the lowest ADP available.
-  const replay = new DraftEngine({ scheduler: { setInterval: () => 1, clearInterval: () => {} } });
+  const replay = new DraftEngine({ players: marketPlayers, scheduler: { setInterval: () => 1, clearInterval: () => {} } });
   snapshot.picks.forEach((row) => {
     if (row.source === 'timer_expiry') {
       const bestAdp = Math.min(...replay.availablePlayers.map((p) => p.adp));
@@ -130,6 +134,22 @@ test('no duplicate players', () => {
   assert.equal(new Set(snapshot.picks.map((p) => p.player_id)).size, snapshot.picks.length);
 });
 
+test('unsigned Tyreek Hill stays out of the first seven rounds', () => {
+  const pick = snapshot.picks.find((row) => engine.playersById[row.player_id].name === 'Tyreek Hill');
+  assert.ok(!pick || pick.round > 7);
+});
+
+test('bots never take a second QB or TE in the first seven rounds', () => {
+  for (const team of engine.teams) {
+    for (const position of ['QB', 'TE']) {
+      const early = snapshot.picks.filter((pick) =>
+        pick.team_id === team.id && pick.round <= 7 && engine.playersById[pick.player_id].position === position
+      );
+      assert.ok(early.length <= 1, `${team.name} drafted ${early.length} ${position}s early`);
+    }
+  }
+});
+
 /* ------------------------------------------------- emit the DB payload ---- */
 
 const players = Object.values(engine.playersById).map((player) => ({
@@ -143,7 +163,10 @@ const players = Object.values(engine.playersById).map((player) => ({
     vor: player.vor,
     tier: player.tier,
     pos_rank: player.posRank,
-    vor_rank: player.vorRank
+    vor_rank: player.vorRank,
+    sleeper_id: player.sleeperId,
+    sleeper_adp: player.sleeperAdp,
+    search_rank: player.searchRank
   }
 }));
 

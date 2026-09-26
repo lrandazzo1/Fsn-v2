@@ -14,6 +14,7 @@
  */
 
 import { POSITIONS } from './types.js';
+import { compareMarket, marketRank } from './sleeperMarket.js';
 
 /**
  * How many players at each position are expected to be "startable" in a league
@@ -31,12 +32,6 @@ export function replacementRanks(teamCount = 12) {
     DST: teamCount
   };
 }
-
-/**
- * Positional bumps applied when deriving ADP only. VOR itself stays pure;
- * these model real drafter behaviour (nobody takes a kicker in round 3).
- */
-const ADP_BIAS = { QB: -18, RB: 12, WR: 6, TE: 0, K: -140, DST: -120 };
 
 /**
  * Computes the replacement-level projection for every position.
@@ -95,7 +90,7 @@ function assignTiers(sortedGroup) {
 }
 
 /**
- * Enriches every player in place with vor, vorRank, posRank, tier and adp.
+ * Enriches players with VOR fields without altering their Sleeper market ranks.
  * Returns the same array for convenient chaining.
  *
  * @param {import('./types.js').Player[]} players
@@ -125,22 +120,7 @@ export function enrichPlayers(players, teamCount = 12) {
       player.vorRank = index + 1;
     });
 
-  // Derived ADP: VOR plus drafter-behaviour bias, then ranked.
-  [...players]
-    .sort((a, b) => draftValue(b) - draftValue(a))
-    .forEach((player, index) => {
-      player.adp = index + 1;
-    });
-
   return players;
-}
-
-/**
- * Board value used for ADP and bot preference: VOR shaped by drafter habits.
- * @param {import('./types.js').Player} player
- */
-export function draftValue(player) {
-  return player.vor + (ADP_BIAS[player.position] || 0);
 }
 
 /**
@@ -163,8 +143,8 @@ export function positionalScarcity(available) {
 }
 
 /**
- * Ranks available players for a specific roster, blending raw VOR with how
- * badly the roster needs the position and how soon the next pick comes back.
+ * Ranks available players by Sleeper market signal. Need is applied by the
+ * draft engine as a position eligibility constraint, never as a rank score.
  *
  * @param {import('./types.js').Player[]} available
  * @param {Record<string, number>} needWeights position -> multiplier bonus
@@ -172,22 +152,17 @@ export function positionalScarcity(available) {
  */
 export function recommendPlayers(available, needWeights = {}, limit = 5) {
   return [...available]
-    .map((player) => ({
-      player,
-      score: round1(player.vor + (needWeights[player.position] || 0))
-    }))
-    .sort((a, b) => b.score - a.score)
+    .sort(compareMarket)
+    .map((player) => ({ player, score: valueDelta(player) }))
     .slice(0, limit);
 }
 
 /**
- * Value left on the board relative to the best player available — used for the
- * "reach / value" tag in the pick ticker.
+ * Projected VOR rank advantage relative to Sleeper market rank.
  * @param {import('./types.js').Player} player
- * @param {number} overallPick
  */
-export function valueDelta(player, overallPick) {
-  return player.adp - overallPick;
+export function valueDelta(player) {
+  return marketRank(player) === 999 ? null : marketRank(player) - player.vorRank;
 }
 
 function round1(value) {
