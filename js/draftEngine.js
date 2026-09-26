@@ -116,6 +116,27 @@ export class DraftEngine {
 
   // ---------------------------------------------------------------- lifecycle
 
+  /**
+   * Swaps the player pool and rebuilds the board around it.
+   *
+   * Used at boot to move the room off the static pool in playerData.js and onto
+   * the rows read from `fsnv2.players`, which carry the roster the sports-data
+   * sync established. It resets the draft, so it has to run *before* any picks
+   * are hydrated; a pool that is empty or malformed is refused outright so a
+   * bad read can never leave the room with no players in it.
+   *
+   * @param {import('./types.js').Player[]} players
+   * @returns {boolean} whether the pool was accepted
+   */
+  usePlayerPool(players) {
+    if (!Array.isArray(players) || players.length === 0) return false;
+    if (this.picks.length > 0) return false;
+
+    this.config.players = players;
+    this.reset();
+    return true;
+  }
+
   /** Rebuilds a fresh draft with the current configuration. */
   reset({ silent = false } = {}) {
     const { teamCount, rounds, userTeamId, players } = this.config;

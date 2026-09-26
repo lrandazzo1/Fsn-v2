@@ -29,13 +29,19 @@
  * fsnv2.sync_runs.
  *
  * Deployment note: this file is the *source* of the function, not the function
- * itself. `npm run build:api` bundles it to `api/sync.js` (git-ignored) with
- * esbuild, and that is what Vercel deploys — because Vercel's own TypeScript
- * step compiles only the entrypoint and leaves `.ts` import specifiers
- * untouched, which fails at runtime with ERR_MODULE_NOT_FOUND. Bundling also
- * means the function has no runtime dependency on type stripping. The `.ts`
- * specifiers stay, so `node scripts/sync-data.ts` and the test suite keep
- * importing these modules directly with no build at all.
+ * itself. `npm run build:api` bundles it to `api/sync.js` with esbuild, and that
+ * is what Vercel deploys — because Vercel's own TypeScript step compiles only
+ * the entrypoint and leaves `.ts` import specifiers untouched, which fails at
+ * runtime with ERR_MODULE_NOT_FOUND. Bundling also means the function has no
+ * runtime dependency on type stripping. The `.ts` specifiers stay, so
+ * `node scripts/sync-data.ts` and the test suite keep importing these modules
+ * directly with no build at all.
+ *
+ * `api/sync.js` is committed, not ignored: it is the deployed artifact, so it is
+ * reviewable in the diff and the repo stays deployable without a build. Editing
+ * this file therefore means re-running `npm run build:api` and committing the
+ * bundle alongside it — `npm run test:sync-data` fails if the two drift apart
+ * ("the committed api/sync.js bundle matches lib/api/syncRoute.ts").
  *
  * Auth: set `CRON_SECRET` in the project's environment variables. Vercel sends
  * it as `Authorization: Bearer $CRON_SECRET` on cron invocations; anything else

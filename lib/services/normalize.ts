@@ -7,7 +7,7 @@
  * rather than inside each mapper.
  */
 
-import { canonicalTeam } from './teams.ts';
+import { CANONICAL_TEAMS, canonicalTeam } from './teams.ts';
 import type { FantasyPosition, GameStatus, StatLine } from './types.ts';
 
 /** Tank01 (and most RapidAPI feeds) send every stat as a string. */
@@ -62,18 +62,41 @@ export function fantasyPosition(value: unknown): FantasyPosition | null {
 }
 
 /**
- * Team abbreviations are stored as one of the 32 canonical codes in teams.ts —
- * 'ARZ' and 'WSH' become ARI and WAS, nflverse's 'LA' becomes LAR — and free
- * agents are 'FA'.
+ * Franchise abbreviations, canonicalised to the set the app renders with
+ * (js/nflTeams.js — the same 32 keys the logo chip, the team colours and the
+ * synthetic NFL slate are keyed on).
  *
- * It used to just uppercase whatever it was handed, which is how a provider's
- * numeric team id (`teamID: 21`) became the team "21" and how the same franchise
- * ended up stored under two spellings. A value that resolves to no franchise now
- * falls back instead of being stored verbatim; `canonicalTeam()` is the variant
- * that reports "unknown" rather than defaulting.
+ * Vendors disagree on a handful of them — Tank01 sends Washington as `WSH`,
+ * other feeds send `JAC` for Jacksonville or still carry a relocated team's old
+ * city — and an abbreviation the UI does not know renders as a grey chip with
+ * no logo and no opponent. Relocations collapse onto the current franchise:
+ * `OAK`/`SD`/`STL` are the same clubs as `LV`/`LAC`/`LAR`.
+ *
+ * The alias table itself now lives in ./teams.ts, which is the one place it is
+ * maintained: this module, the player audit and `fsnv2.canonical_team()` in
+ * migration 0007 all read from the same list, so a code added for one of them is
+ * added for all three. teams.ts also refuses anything numeric, which is what
+ * keeps a provider's internal team id out of a column that holds franchises.
  */
+
+/** The 32 franchise codes everything downstream is keyed by. */
+export const NFL_TEAM_ABBRS = new Set(CANONICAL_TEAMS);
+
+/** Team abbreviations are compared and stored uppercase; free agents are 'FA'. */
 export function teamAbbr(value: unknown, fallback = 'FA'): string {
-  return canonicalTeam(value) ?? (fallback === 'FA' ? 'FA' : canonicalTeam(fallback) ?? 'FA');
+  return canonicalTeam(value) ?? canonicalTeam(fallback) ?? fallback;
+}
+
+/**
+ * The same, but null for anything that is not one of the 32 franchises.
+ *
+ * Used wherever a value has to be a *team* and not merely a string: a game's
+ * two sides, a projection's `team`, a roster entry's affiliation. Writing an
+ * unrecognised code through means the row no longer joins to its game in
+ * fsnv2.nfl_matchups, and the player renders someone else's opponent.
+ */
+export function knownTeamAbbr(value: unknown): string | null {
+  return canonicalTeam(value);
 }
 
 /** Suffixes that a feed appends to a surname and another feed leaves off. */
@@ -89,7 +112,8 @@ const NAME_SUFFIXES = new Set(['JR', 'SR', 'II', 'III', 'IV', 'V']);
  *   'A.J. Brown'        -> 'ajbrown'
  *   'Kenneth Walker III'-> 'kennethwalker'
  *
- * Suffix stripping is what the first reconciliation pass was missing: 42 of the
+ * Suffix stripping is the part `fsnv2_player_match_key()` (migration 0006) does
+ * not do, and it is what the first reconciliation pass was missing: 42 of the
  * 208 hand-maintained rows failed to match the roster feed purely on 'Sr.',
  * which left their team assignments frozen at whatever they were seeded with.
  */
@@ -98,7 +122,7 @@ export function normalizePlayerName(value: unknown): string {
   if (!raw) return '';
   const words = raw
     .normalize('NFKD')
-    .replace(/[̀-ͯ]/g, '')
+    .replace(/[\u0300-\u036f]/g, '')
     .toUpperCase()
     .replace(/[^A-Z0-9\s]/g, ' ')
     .split(/\s+/)

@@ -1,45 +1,46 @@
 -- =============================================================================
--- FSN v2 — Player identity, headshots, and one spelling per franchise
+-- FSN v2 — Player identity, headshots, and an external ground truth
 -- Apply to the Supabase project `FSN` as migration `fsnv2_player_identity_audit`.
 --
--- Three defects, one root cause: `fsnv2.players.team` was whatever the last
--- writer said it was, and nothing in the schema could tell a franchise code from
--- a number.
+-- Migration 0006 fixed the *internal* disagreement: the synthetic pool now takes
+-- its team from the synced provider pool, one spelling per franchise, and the
+-- browser can no longer push a former club back over a synced one. That closes
+-- the loop between our two pools.
 --
---   1. A provider's numeric team id could land in `team`. Tank01 keys its
---      roster payload by `teamID`, so a mapper that read the key instead of
---      `teamAbv` stored "21" as a franchise (the same class of bug migration
---      0005 fixed for DST rows, which were coming through as `DST-10`).
+-- It cannot close the loop with the league. When both pools agree and both are
+-- wrong — a player who moved and whom the vendor has not re-rostered, or one the
+-- roster feed never carried — there is nothing inside the database to compare
+-- against. `fsnv2.players` also had no portrait to render and no cross-feed id to
+-- reconcile on, so every match had to go through a name.
 --
---   2. The same franchise arrived under several spellings — ARI/ARZ, WAS/WSH,
---      LAR/LA — which splits one team's roster across two codes, so a
---      by-team read silently returns half a roster.
+-- This migration adds the outside reference and the columns it needs:
 --
---   3. `public.fsnv2_upsert_players` is granted to anon: every browser session
---      pushes js/playerData.js into the table and overwrites `team` from a
---      hand-maintained file. A team assignment corrected on Monday was back to
---      the file's value the next time anyone opened the draft board. That is
---      how a player who had moved kept reappearing on his old team, and it is
---      why this migration hardens that function rather than only backfilling
---      data.
---
--- What this migration adds:
---
---   fsnv2.canonical_team(text)          one spelling per franchise, and NULL —
---                                       never a guess — for a number or an
---                                       unknown code
---   players.gsis_id/espn_id/            the cross-feed identity the reconcile
---     sleeper_id/rotowire_id            step matches on
---   players.headshot_url                the portrait the UI has had nowhere to
---                                       read from
---   players.team_source/audited_at      who last set `team`, so a verified
---                                       assignment outranks a client push
+--   fsnv2.canonical_team(text)          the strict half of fsnv2_team_abbr: NULL —
+--                                       never a guess — for a numeric team id or
+--                                       an unknown code. A number is a provider's
+--                                       internal team id, and storing it as a
+--                                       franchise is what produced rows like
+--                                       "21" and the `DST-10` of migration 0005.
+--   players.gsis_id/espn_id/            the cross-feed identity that lets a row be
+--     sleeper_id/rotowire_id            matched without trusting its name
+--   players.headshot_url                the portrait the UI had nowhere to read
+--   players.team_source/audited_at      who last set `team`, so a reconciled
+--                                       assignment outranks a client push even
+--                                       when the provider pool has never heard of
+--                                       the player
 --   fsnv2_players_audit_snapshot()      what scripts/audit-players.ts reads
---   fsnv2_apply_player_audit(jsonb)     what it writes, per-column and counted
+--   fsnv2_preview_player_audit(jsonb)   the read-only twin — what --dry-run reports
+--   fsnv2_apply_player_audit(jsonb,...) what it writes, per column and counted
+--   fsnv2_player_audit_status()         a standing view of what is still missing
 --
--- and it teaches both existing write paths — the anon seed and the provider
--- sync — to normalize what they are given and to look a player up by id before
--- overwriting his team.
+-- 0006's `fsnv2_team_abbr`, `fsnv2_player_key` and `fsnv2_refresh_player_teams`
+-- all stay exactly as they are and keep doing their job; `fsnv2_team_abbr` is
+-- re-pointed at the alias table below so the list is maintained in one place
+-- rather than three, with its contract ("alias, else the code uppercased")
+-- unchanged. The two upsert functions keep every guard 0006 gave them and gain
+-- the identity columns, plus the one lookup the ingestion layer was still
+-- missing: a verified team propagated between the two rows for the same player
+-- by `espn_id`, which works for players 0006's name match cannot reach.
 --
 -- Re-runnable: every DDL statement is guarded and every function is CREATE OR
 -- REPLACE.
@@ -109,6 +110,26 @@ $$;
 comment on function fsnv2.canonical_team(text) is
   'One spelling per NFL franchise. NULL for a numeric team id, a free-agent code, or an unknown abbreviation — callers decide what to do rather than storing a junk code.';
 
+-- 0006's alias function, re-pointed at the table above so the list is maintained
+-- in one place. Its contract is unchanged — an alias resolves, anything else is
+-- passed through uppercased — which matters because fsnv2_refresh_player_teams()
+-- writes its result straight into a NOT NULL column and must never be handed a
+-- NULL. Code that needs "is this actually a franchise?" calls
+-- fsnv2.canonical_team() and handles the NULL.
+create or replace function public.fsnv2_team_abbr(p_abbr text)
+returns text
+language sql immutable as $$
+  select coalesce(
+    fsnv2.canonical_team(p_abbr),
+    upper(nullif(btrim(coalesce(p_abbr, '')), ''))
+  );
+$$;
+
+comment on function public.fsnv2_team_abbr(text) is
+  'One canonical abbreviation per franchise (WSH -> WAS, JAC -> JAX, OAK -> LV …), '
+  'falling through to the uppercased input. Aliases come from fsnv2.canonical_team(), '
+  'which mirrors CANONICAL_TEAMS/TEAM_ALIASES in lib/services/teams.ts.';
+
 -- --------------------------------------------- players: identity + headshots --
 alter table fsnv2.players add column if not exists gsis_id      text;
 alter table fsnv2.players add column if not exists espn_id      text;
@@ -147,17 +168,29 @@ comment on column fsnv2.players.espn_id is
 comment on column fsnv2.players.headshot_url is
   'Portrait URL: ESPN''s headshot combiner for a player, ESPN''s team logo for a DST row.';
 
--- One-time normalization of what is already stored. A code that resolves to no
--- franchise is left alone and surfaced by the audit rather than overwritten.
+-- 0006's backfill already canonicalised every stored abbreviation through
+-- fsnv2_team_abbr. This is the same pass under the stricter function, which
+-- additionally catches a numeric code that predates either migration. A value
+-- that resolves to no franchise is left alone and surfaced by the audit rather
+-- than overwritten, since there is nothing to overwrite it *with*.
 update fsnv2.players
    set team = fsnv2.canonical_team(team)
  where fsnv2.canonical_team(team) is not null
    and fsnv2.canonical_team(team) <> team;
 
-update fsnv2.nfl_teams
-   set abbr = fsnv2.canonical_team(abbr)
- where fsnv2.canonical_team(abbr) is not null
-   and fsnv2.canonical_team(abbr) <> abbr;
+-- nfl_teams is unique on (provider, abbr), so only rewrite where the canonical
+-- spelling is not already taken by another row for the same provider (the guard
+-- 0006 established).
+update fsnv2.nfl_teams t
+   set abbr = fsnv2.canonical_team(t.abbr), updated_at = now()
+ where fsnv2.canonical_team(t.abbr) is not null
+   and fsnv2.canonical_team(t.abbr) <> t.abbr
+   and not exists (
+     select 1 from fsnv2.nfl_teams o
+      where o.provider = t.provider
+        and o.abbr = fsnv2.canonical_team(t.abbr)
+        and o.id <> t.id
+   );
 
 -- Existing rows predate the column; label them by where they came from so the
 -- guards below have something to reason about.
@@ -353,14 +386,20 @@ $$;
 
 -- --------------------------------------------- hardened: the anon seed path --
 -- js/persistence.js pushes the local projection pool through this function on
--- every draft-board load. It used to write `team` verbatim, which made a
--- hand-maintained file the highest authority in the system: a corrected team
--- assignment lasted until the next page view.
+-- every draft-board load, which used to make a hand-maintained file the highest
+-- authority in the system.
 --
--- Now: the code is canonicalized, a code that is not a franchise never lands,
--- and a row whose team came from the reference data or a live roster feed keeps
--- it. Projections, ADP and the VOR fields still come from the client — those are
--- the pool's own numbers and nothing else computes them.
+-- 0006 fixed that for any player the provider pool knows: `team` is taken from
+-- the freshest synced row rather than from the payload. Kept verbatim here, with
+-- two additions for the players that pool does *not* know:
+--
+--   * a team the audit reconciled (team_source = 'nflverse') outranks the
+--     client, exactly as a synced one does — otherwise the one class of player
+--     only the external reference can fix would drift straight back;
+--   * a code that is not a franchise never lands, whatever the client sent.
+--
+-- Everything else it writes — ADP, VOR, projections, tiers — still belongs to the
+-- draft engine and is unchanged.
 create or replace function public.fsnv2_upsert_players(p_players jsonb)
 returns integer
 language plpgsql security definer set search_path = fsnv2, public as $$
@@ -375,24 +414,54 @@ begin
       coalesce((p ->> 'adp')::numeric, 999) as adp,
       coalesce(p -> 'stats', '{}'::jsonb)   as stats
     from jsonb_array_elements(p_players) as p
+  ), current_teams as (
+    select distinct on (public.fsnv2_player_key(name), position)
+           public.fsnv2_player_key(name) as match_key,
+           position,
+           fsnv2.canonical_team(team)    as team,
+           nfl_team_external_id
+      from fsnv2.players
+     where provider is not null
+       and coalesce(team, '') not in ('', 'FA')
+     order by public.fsnv2_player_key(name), position, synced_at desc nulls last
+  ), resolved as (
+    select r.id, r.name, r.position,
+           coalesce(c.team, r.team) as team,
+           c.nfl_team_external_id,
+           c.team is not null       as from_provider,
+           r.adp, r.stats
+      from rows r
+      left join current_teams c
+        on c.match_key = public.fsnv2_player_key(r.name)
+       and c.position = r.position
   ), upserted as (
-    insert into fsnv2.players (id, name, position, team, adp, stats, team_source)
-    select id, name, position, coalesce(team, 'FA'), adp, stats, 'local' from rows
+    insert into fsnv2.players
+      (id, name, position, team, nfl_team_external_id, adp, stats, team_source)
+    select id, name, position, coalesce(team, 'FA'), nfl_team_external_id, adp, stats,
+           case when from_provider then 'provider' else 'local' end
+      from resolved
     on conflict (id) do update
+      -- ON CONFLICT can only see `excluded` and the target row, so "did this team
+      -- come from the synced pool?" rides in as excluded.team_source.
       set name = excluded.name,
           position = excluded.position,
-          -- Keep a verified assignment; accept the client's only when it is a
-          -- real franchise and nothing better is on record.
+          -- The synced pool still wins (0006). Beyond that: an audited team is
+          -- kept, and a client code that is not a franchise never replaces one
+          -- that is.
           team = case
-                   when fsnv2.players.team_source in ('nflverse','provider') then fsnv2.players.team
+                   when excluded.team_source = 'provider' then excluded.team
+                   when fsnv2.players.team_source = 'nflverse' then fsnv2.players.team
                    when excluded.team = 'FA' then fsnv2.players.team
                    else excluded.team
                  end,
           team_source = case
-                          when fsnv2.players.team_source in ('nflverse','provider')
-                            then fsnv2.players.team_source
+                          when excluded.team_source = 'provider' then 'provider'
+                          when fsnv2.players.team_source = 'nflverse' then 'nflverse'
+                          when excluded.team = 'FA' then fsnv2.players.team_source
                           else 'local'
                         end,
+          nfl_team_external_id =
+            coalesce(excluded.nfl_team_external_id, fsnv2.players.nfl_team_external_id),
           adp = excluded.adp,
           stats = excluded.stats,
           updated_at = now()
@@ -404,18 +473,23 @@ end;
 $$;
 
 -- ------------------------------------------ hardened: the provider sync path --
--- Same contract as 0004, plus:
---   * every team code goes through canonical_team, so 'ARZ'/'WSH'/'LA' and a
---     numeric teamID can no longer reach the column;
+-- 0006's contract, kept whole — canonical abbreviations on the way in, and
+-- fsnv2_refresh_player_teams() at the end so the synthetic pool can never be
+-- more than one sync cycle stale — plus:
+--
+--   * the provider's identity columns are carried through instead of dropped,
+--     which is what keeps the audit's espn_id/sleeper_id fresh between runs;
 --   * a batch that cannot resolve a player's team no longer overwrites a stored
---     one with 'FA' — a roster feed only lists rostered players, so an
---     unresolvable code means "the payload did not say", not "free agent";
---   * the provider's identity columns are carried through instead of being
---     dropped, which is what keeps the audit's espn_id/sleeper_id fresh;
---   * a verified team is propagated to the hand-maintained row for the same
---     player, matched by espn_id — the ID lookup that was missing. Without it
---     the two rows for one man drift apart and the draft board reads the stale
---     one.
+--     one with 'FA'. A roster feed only lists rostered players, so an
+--     unresolvable code means "the payload did not say", not "free agent" — and
+--     0006's rule that the roster is the affiliation still holds for every row
+--     where the payload *did* say;
+--   * a verified team is propagated to the synthetic row for the same player by
+--     `espn_id`. fsnv2_refresh_player_teams() matches on name + position, which
+--     misses exactly the rows whose names disagree ('Deebo Samuel' vs 'Deebo
+--     Samuel Sr.'); an id match does not care what either side calls him.
+--   * `unmapped_teams` is returned, so a mapper regression shows up in the sync
+--     log instead of quietly filing a roster under 'FA'.
 create or replace function public.fsnv2_sync_players(
   p_provider text,
   p_players  jsonb
@@ -428,6 +502,7 @@ declare
   v_total     integer;
   v_unmapped  integer := 0;
   v_linked    integer := 0;
+  v_refresh   jsonb;
 begin
   if p_provider is null or p_provider = '' then
     raise exception 'fsnv2_sync_players: provider is required' using errcode = 'P0001';
@@ -447,9 +522,6 @@ begin
 
   select count(*) into v_total from jsonb_array_elements(p_players);
 
-  -- Rows whose team the payload did not state in a form we recognise. Counted
-  -- and returned so a mapper regression is visible in the sync log instead of
-  -- quietly filing a roster under 'FA'.
   select count(*) into v_unmapped
     from jsonb_array_elements(p_players) p
    where fsnv2.canonical_team(p ->> 'team') is null;
@@ -460,7 +532,7 @@ begin
       (p ->> 'external_id')                as external_id,
       (p ->> 'name')                       as name,
       upper(p ->> 'position')              as position,
-      fsnv2.canonical_team(p ->> 'team')   as team,
+      coalesce(fsnv2.canonical_team(p ->> 'team'), 'FA') as team,
       nullif(p ->> 'nfl_team_external_id', '') as nfl_team_external_id,
       coalesce(nullif(p ->> 'adp', '')::numeric, 999) as adp,
       coalesce(p -> 'stats', '{}'::jsonb)  as stats,
@@ -484,19 +556,24 @@ begin
       (id, name, position, team, adp, stats, provider, external_id, nfl_team_external_id,
        jersey, status, injury, bye_week, age, experience, college,
        espn_id, sleeper_id, gsis_id, rotowire_id, headshot_url, team_source, synced_at)
-    select id, name, position, coalesce(team, 'FA'), adp, stats, p_provider, external_id,
+    select id, name, position, team, adp, stats, p_provider, external_id,
            nfl_team_external_id, jersey, status, injury, bye_week, age, experience, college,
            espn_id, sleeper_id, gsis_id, rotowire_id, headshot_url, 'provider', now()
       from eligible
     on conflict (provider, external_id) do update
+      -- The roster the sync read this player from is his affiliation (0006), so
+      -- team and nfl_team_external_id are overwritten rather than coalesced —
+      -- unless the payload named no franchise at all.
       set name = excluded.name,
           position = excluded.position,
-          -- An unresolvable code never replaces a stored franchise.
           team = case when excluded.team = 'FA' then fsnv2.players.team else excluded.team end,
           team_source = case when excluded.team = 'FA' then fsnv2.players.team_source else 'provider' end,
           adp = case when excluded.adp = 999 then fsnv2.players.adp else excluded.adp end,
           stats = fsnv2.players.stats || excluded.stats,
-          nfl_team_external_id = excluded.nfl_team_external_id,
+          nfl_team_external_id = case
+                                   when excluded.team = 'FA' then fsnv2.players.nfl_team_external_id
+                                   else excluded.nfl_team_external_id
+                                 end,
           jersey = excluded.jersey, status = excluded.status, injury = excluded.injury,
           bye_week = excluded.bye_week, age = excluded.age,
           experience = excluded.experience, college = excluded.college,
@@ -514,13 +591,14 @@ begin
     into v_inserted, v_updated
     from upserted;
 
-  -- Keep the hand-maintained row for the same player in step, by id. This is the
-  -- lookup the ingestion layer was missing: without it the provider row moves and
-  -- the `p-XXXX` row the draft board reads does not.
+  -- The id-keyed half of the refresh: the two rows for one player kept in step
+  -- by espn_id, for the players a name match cannot reach.
   with linked as (
     update fsnv2.players local_row
        set team = provider_row.team,
            team_source = 'provider',
+           nfl_team_external_id =
+             coalesce(provider_row.nfl_team_external_id, local_row.nfl_team_external_id),
            headshot_url = coalesce(local_row.headshot_url, provider_row.headshot_url),
            updated_at = now()
       from fsnv2.players provider_row
@@ -530,28 +608,25 @@ begin
        and local_row.espn_id = provider_row.espn_id
        and local_row.position = provider_row.position
        and provider_row.team <> 'FA'
-       and local_row.team <> provider_row.team
+       and local_row.team is distinct from provider_row.team
     returning 1
   )
   select count(*) into v_linked from linked;
 
+  -- And 0006's name-keyed half, unchanged.
+  v_refresh := public.fsnv2_refresh_player_teams();
+
   return jsonb_build_object(
     'inserted', v_inserted, 'updated', v_updated,
     'skipped', v_total - v_inserted - v_updated, 'total', v_total,
-    'unmapped_teams', v_unmapped, 'linked_local_rows', v_linked);
+    'unmapped_teams', v_unmapped, 'linked_by_espn_id', v_linked,
+    'refreshed', v_refresh);
 end;
 $$;
 
 -- ------------------------------------------------------------------ reads --
--- Unchanged in shape from 0002 — `select *`, so the new headshot_url and identity
--- columns reach the UI without the read RPC having to be edited again, and no
--- existing consumer loses a field.
-create or replace function public.fsnv2_players(p_limit integer default 1000)
-returns jsonb
-language sql security definer set search_path = fsnv2, public as $$
-  select coalesce(jsonb_agg(to_jsonb(p) order by p.adp), '[]'::jsonb)
-  from (select * from fsnv2.players order by adp limit p_limit) p;
-$$;
+-- fsnv2_players (0002) already returns `select *`, so headshot_url and the
+-- identity columns reach the UI with no change to the read RPC.
 
 -- A standing audit view: what is still missing, per franchise. Cheap enough to
 -- poll from a dashboard and the fastest way to see a regression reappear.

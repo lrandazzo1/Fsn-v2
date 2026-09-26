@@ -34,20 +34,21 @@ index.html              App shell: nav bar + the four view panes
 styles.css              Dark sports-network design system (position colour coding)
 js/config.js            Supabase credentials + league defaults (override via window.FSN_CONFIG)
 js/types.js             Player / Team / Pick / DraftState shapes + roster slot template
-js/playerData.js        The player pool (compact tuples -> Player objects)
+js/playerData.js        Offline fallback pool (compact tuples -> Player objects)
+js/liveData.js          Maps the synced rows onto the pool / projection / slate shapes
 js/vorMath.js           Replacement levels, VOR, tiers, derived ADP, scarcity, recommendations
 js/draftTimer.js        The pick clock (injectable scheduler so tests run instantly)
 js/draftEngine.js       Snake state machine: pick progression, clock expiry, bots, undo, hydrate
 js/seasonEngine.js      Round-robin schedule, weekly score engine, W-L / PF / PA standings
-js/nflTeams.js          NFL colours, logo URLs and the synthetic weekly opponent slate
-js/persistence.js       DraftRepository + SeasonRepository — Supabase RPCs, localStorage mirror
+js/nflTeams.js          NFL colours, logo URLs, team-code aliases and the synced weekly slate
+js/persistence.js       DraftRepository + SeasonRepository — Supabase RPCs, live reads, localStorage mirror
 js/router.js            Hash router for the app shell
 js/uiRenderer.js        Draft-room rendering + shared view helpers
 js/views/home.js        Home Dashboard
 js/views/league.js      League Overview (season standings + roster composition)
 js/views/matchup.js     Matchup / Scoreboard hub
 js/views/team.js        Team Roster
-js/app.js               Boot, state restore, event wiring, control handlers
+js/app.js               Boot, live-data load, state restore, event wiring, control handlers
 lib/services/sportsData.ts        Ingestion facade: the four sync methods
 lib/services/providers/           Provider registry + the Tank01 / RapidAPI fetcher
 lib/services/syncRepository.ts    Batched UPSERTs through the fsnv2_sync_* RPCs
@@ -65,9 +66,9 @@ scripts/test-sync-data.ts  Sync verification CLI (npm run test:sync-data)
 scripts/audit-players.ts   Player audit CLI (npm run audit:players)
 scripts/test-audit-players.ts  Audit verification CLI (npm run test:audit)
 supabase/migrations/    Schema + RPC migrations (0004 adds the sync tables, 0005 the derivations,
-                        0006 player identity, headshots and the team-code canon)
+                        0006 the team refresh, 0007 player identity + headshots)
 tests/engine.test.mjs   41 assertions: snake order, clock expiry, rosters, hydration
-tests/season.test.mjs   42 assertions: schedule, simulation, standings, hydration
+tests/season.test.mjs   51 assertions: schedule, simulation, standings, NFL matchups, hydration
 tests/draft-sim.test.mjs Full 15-round simulation + optional database round-trip
 ```
 
@@ -196,9 +197,24 @@ has to survive that CDN being blocked. The logo sits on top of a chip carrying
 the team's abbreviation in its primary colour, so a failed load degrades to the
 chip instead of a broken-image icon.
 
-> The weekly NFL opponents are synthetic, exactly like the projections in
-> `playerData.js`: a 32-team round robin over the same seeded shuffle. They are
-> display context next to a player's name, never an input to scoring.
+### Where a player's team and matchup come from
+
+Both come from the provider payload, and from nothing else.
+
+* **Team** — `js/liveData.js` builds the pool from the synced `fsnv2_players`
+  rows, so a player's team is Tank01's own `teamAbv` (canonicalised: `WSH` →
+  `WAS`, `JAC` → `JAX`, `OAK` → `LV`). The team column in `js/playerData.js` is
+  the offline seed and is replaced the moment the database answers.
+* **Matchup** — `setLiveSlate()` is handed the real games from
+  `fsnv2_nfl_schedule` and writes both sides of each one, so the label is a
+  lookup: `@ HOME` when the player's team is the away side, `vs AWAY` when it is
+  the home side, `BYE` when a synced week holds no game for that franchise, and
+  `—` when the week has not been synced at all.
+
+There is **no generated slate** behind any of that. A synthetic round robin is
+indistinguishable from a real fixture on screen, which is precisely how players
+came to be labelled "vs CLE" / "@ PIT" / "@ SEA" against teams they were not
+playing. An unknown week now says so.
 
 ## Simulate Week (the dummy score engine)
 
@@ -238,6 +254,18 @@ Applied to the Supabase project **FSN** as `fsnv2_draft_engine_schema`,
 `supabase/migrations/`). `0004_fsnv2_sports_data_sync.sql` adds the ingestion
 tables and RPCs — apply it before the first sync run. Tables live in a dedicated `fsnv2` schema so they
 never collide with the existing `public.*` tables.
+
+**Apply them in order, all six.** `0006_fsnv2_player_team_refresh.sql` is not
+optional: without it `fsnv2_upsert_players` still carries its original 0002
+body, and the browser overwrites every synced roster on each page load (see
+[Team affiliations](#team-affiliations) below). Every
+migration is idempotent, so re-applying one on a project that already has it is
+a no-op.
+
+```bash
+# in order — 0006 replaces the 0002 definition of fsnv2_upsert_players
+for f in supabase/migrations/000*.sql; do psql "$DATABASE_URL" -f "$f"; done
+```
 
 | Table | Columns |
 | --- | --- |
@@ -314,6 +342,47 @@ queues writes with retries, keeps a localStorage mirror, and reports status in
 the nav bar (`db synced` / `syncing` / `local only` / `sync error`). On load the
 app restores from the database first, then localStorage, then a fresh room.
 
+### Live data in the browser
+
+The UI reads the synced data directly rather than shipping it. On boot
+`js/app.js` calls `DraftRepository.liveBundle()`, which reads three RPCs — all
+granted to `anon`, so the publishable key is enough and no secret ever reaches
+the browser:
+
+| RPC | Replaces |
+| --- | --- |
+| `fsnv2_players` | the static pool in `js/playerData.js` |
+| `fsnv2_projections` | the `season projection / 17` weekly estimate |
+| `fsnv2_nfl_schedule` | the real slate behind the `@ MIA` / `vs NYJ` / `BYE` tags |
+
+`js/liveData.js` maps the rows onto the shapes the app already speaks and is
+pure — no network, so it is trivially testable. It mirrors `fsnv2_player_key`
+and `fsnv2_team_abbr` in JavaScript so client-side matching agrees with the
+database, and it keys team defenses by abbreviation because the provider names
+them `MIN D/ST` where the pool says `Vikings D/ST`.
+
+Two deliberate limits:
+
+- **The pool is built only from rows with a real `stats.projection`.** The sync
+  writes ~540 roster rows with `adp` 999 and no projection; letting those into
+  the pool would drag every replacement level to zero and make VOR meaningless.
+  They still inform the team/bye index.
+- **Weeks the sync has not stored do not get an invented fixture.** The weekly
+  points estimate still falls back to `season projection / 17`, but the opponent
+  reads `—` and renders dimmed (`.is-projected`), as does a `BYE`. Nothing on
+  screen is ever a fabricated opponent.
+
+`annotatePlayers()` stamps `{ team, opponent, opponentTeam, isHome, onBye }`
+onto every player for the week being shown, so the starting-lineup and bench
+components read `{player.team}` and `{player.opponent}` straight off the
+payload; `playerOpponentLabel()` falls back to a direct slate lookup, so a
+component can never render a stale stamp.
+
+Every step is optional. A disabled, unreachable or unsynced database leaves the
+fallback in place and the app runs exactly as it did before — which is what
+`npm run dev` with no credentials does, and what the Node test-suite uses.
+Set `sportsData.enabled = false` to ignore the synced data deliberately.
+
 ### Configuration
 
 `js/config.js` carries the project URL and the **publishable** key (safe in the
@@ -327,19 +396,25 @@ editing the file:
   window.FSN_CONFIG = {
     supabase: { url: 'https://<project>.supabase.co', key: 'sb_publishable_…' },
     league:   { name: 'My League', totalTeams: 12, rounds: 15, timerSeconds: 60 },
-    season:   { weeks: 14, seed: 20260208 }
+    season:   { weeks: 14, seed: 20260208 },
+    sportsData: { season: 2026, seasonType: 'reg', scoringFormat: 'ppr', enabled: true }
   };
 </script>
 ```
 
-Set `supabase.enabled = false` to run fully offline on localStorage.
+Set `supabase.enabled = false` to run fully offline on localStorage, or
+`sportsData.enabled = false` to keep the database but ignore the synced player
+pool, projections and schedule. `sportsData.season` defaults to the season the
+current date falls in (September–February belongs to the earlier year), matching
+`lib/services/env.ts` so the browser and the sync service agree.
 
 ## Background sports-data sync
 
-The draft board runs on the synthetic pool in `js/playerData.js`. The sync
-service replaces that with real NFL data — players, rosters, weekly projections,
-box scores and the schedule — on a schedule of its own, without the UI having to
-know where any of it came from.
+The sync service pulls real NFL data — players, rosters, weekly projections,
+box scores and the schedule — into Postgres on a schedule of its own. The UI
+then reads it back through the RPCs above (see
+[Live data in the browser](#live-data-in-the-browser)); `js/playerData.js` is
+only the offline fallback for when there is nothing synced to read.
 
 ```
 lib/services/sportsData.ts          the facade: four methods, one result shape
@@ -419,6 +494,11 @@ Node 22+ runs the TypeScript directly (`--experimental-strip-types` is the
 default from 22.6), so the service keeps the project's no-build promise: no
 bundler, no `node_modules`, nothing to compile before a cron job can call it.
 
+A `players` run also repairs the browser's own pool rows: since migration
+`0006`, `fsnv2_sync_players` calls `fsnv2_refresh_player_teams()` at the end of
+every player sync, so no follow-up step is needed. Run it by hand only to patch
+rows without re-syncing — see [Team affiliations](#team-affiliations).
+
 ### Scheduled runs on Vercel
 
 `lib/api/syncRoute.ts` is the scheduled entrypoint, and `vercel.json` points a
@@ -480,9 +560,9 @@ run in order and stop starting new work near the function's time limit, reportin
 | `CRON_SECRET` | Vercel Cron sends it as `Authorization: Bearer $CRON_SECRET`; the route requires it once set, and warns in its response while it is missing |
 | `SUPABASE_URL` | optional — defaults to the project in `js/config.js` |
 
-Migrations `0003`, `0004` and `0005` must be applied to the Supabase project
-before the first run, or every write fails with `Could not find the function
-public.fsnv2_sync_players`.
+Migrations `0003`, `0004`, `0005` and `0006` must be applied to the Supabase
+project before the first run, or every write fails with `Could not find the
+function public.fsnv2_sync_players`.
 
 ### Mapping
 
@@ -521,6 +601,36 @@ scores — which is the order the weekly bundle already runs in. A row whose gam
 or player has not synced yet keeps a null rather than failing, and a re-run never
 trades a derived value back for the provider's null.
 
+### Team affiliations
+
+A player's club is whatever roster the sync read him from — never the `team`
+field on his own record, which a vendor leaves pointing at his former club for a
+while after a trade. `fetchPlayers` reads `getNFLTeams?rosters=true` and takes
+the enclosing franchise's abbreviation and id (only the flat `getNFLPlayerList`
+fallback, which has no enclosing roster, uses the entry's own fields), and
+`fsnv2_sync_players` overwrites `team` and `nfl_team_external_id` on every run
+rather than coalescing them.
+
+Two things then keep the rest of the app in step (migration `0006`):
+
+| | |
+| --- | --- |
+| `fsnv2_refresh_player_teams()` | copies the current team, NFL team id and bye week onto the synthetic `js/playerData.js` rows (provider null), matched on normalised name + position. `fsnv2_sync_players` calls it at the end of every player sync, and it can be run on its own as a patch: `select public.fsnv2_refresh_player_teams();` |
+| `fsnv2_upsert_players` | the browser re-pushes its local pool on every page load; it now resolves each row's `team` against the synced pool first, so a static file can never write a former club back over a synced one |
+
+`fsnv2_team_abbr()` gives every franchise one spelling on the way in — Tank01
+sends Washington as `WSH`, other feeds send `JAC`, `OAK` or `LA` — because the
+UI keys its colours, logos and opponents on the 32 abbreviations in
+`js/nflTeams.js`, and an abbreviation it does not know renders as a grey chip
+with no logo. The same alias table lives in `lib/services/normalize.ts` (new
+rows), in the SQL function (rows already stored) and in `js/nflTeams.js`
+(rendering, via `normalizeAbbr()`).
+
+The team badge itself is `teamLogoHtml()` in `js/nflTeams.js`, shared by the
+matchup board, the player pool, the roster slots and the Team page, and driven
+entirely by the player's current `team` — so a player who changes clubs shows
+his new badge everywhere as soon as the sync lands.
+
 > **Why `nfl_matchups` and not `matchups`?** `fsnv2.matchups` is the *fantasy*
 > head-to-head schedule: league-scoped, integer franchise slots 1-12, with the
 > unique constraints `fsnv2_generate_schedule` asserts against. Real NFL games
@@ -530,25 +640,26 @@ trades a derived value back for the provider's null.
 
 ## Player audit & migration pipeline
 
-The sync keeps rows *fresh*; it did not keep them *right*. Three things went
-wrong at once, and all three came back to the same root cause — `fsnv2.players.team`
-was whatever the last writer said it was, and nothing could tell a franchise code
-from a number:
+Migration `0006` above closes the loop between our two pools: the synthetic rows
+take their team from the synced provider rows, every franchise has one spelling,
+and the browser can no longer push a former club back over a synced one.
 
-1. **A provider's numeric team id could land in `team`.** Tank01 keys its roster
-   payload by `teamID`, so a mapper reading the key instead of `teamAbv` stored
-   `"21"` as a franchise — the same class of bug that produced `DST-10` rows
-   before migration `0005`.
-2. **One franchise, several spellings.** ARI/ARZ, WAS/WSH, LAR/LA. A by-team read
-   returns half a roster and nothing errors.
-3. **The hand-maintained pool outranked everything.** `public.fsnv2_upsert_players`
-   is granted to `anon`, so every draft-board load pushed `js/playerData.js` into
-   the table and overwrote `team` from a file. A correction lasted until the next
-   page view — which is how a player who had moved kept reappearing on his old
-   team.
+It cannot close the loop with the league. Both of those pools can be wrong
+*together* — a player who moved and whom the vendor has not re-rostered, or one
+the roster feed never carried at all — and there is then nothing inside the
+database to compare against. Two more gaps sat alongside it:
 
-And `headshot_url` did not exist at all, so the UI had nowhere to read a portrait
-from.
+- `fsnv2.players` had no `headshot_url`, so the UI had nowhere to read a portrait
+  from.
+- It carried no cross-feed id either, so every reconciliation had to go through a
+  name. `fsnv2_player_key()` reduces a name to letters and digits, which handles
+  `Wan'Dale Robinson` but not `Deebo Samuel` vs `Deebo Samuel Sr.` — and a
+  generational suffix is exactly what two feeds disagree about. 42 of the 208
+  synthetic rows failed to match on that alone, which left their teams frozen at
+  whatever they were seeded with.
+
+So the audit (`npm run audit:players`) adds an outside reference and the columns
+needed to match against it without trusting a name.
 
 ### The ground truth
 
@@ -624,11 +735,11 @@ stops the two disagreeing at all. Only the third element of each tuple is
 touched, by an anchored per-line replacement, so projections and row order — which
 the `p-0007`-style ids depend on — are untouched.
 
-### The database half (migration `0006`)
+### The database half (migration `0007`)
 
 | Added | Purpose |
 | --- | --- |
-| `fsnv2.canonical_team(text)` | one spelling per franchise; **NULL** — never a guess — for a numeric team id or an unknown code |
+| `fsnv2.canonical_team(text)` | the strict half of `fsnv2_team_abbr`: **NULL** — never a guess — for a numeric team id or an unknown code. A number is a provider's internal team id, and storing it as a franchise is what produced rows like `"21"` and the `DST-10` of migration `0005`. `fsnv2_team_abbr` now reads its alias table from here, so the list is maintained in one place; its own contract (alias, else the code uppercased) is unchanged, because `fsnv2_refresh_player_teams()` writes its result into a NOT NULL column |
 | `players.gsis_id/espn_id/sleeper_id/rotowire_id` | the cross-feed identity the reconcile step matches on (indexed, deliberately **not** unique — the pool and a provider each keep their own row for the same human) |
 | `players.headshot_url` | the portrait the UI had nowhere to read from |
 | `players.team_source` / `audited_at` | who last set `team`, so a verified assignment outranks a client push |
@@ -637,19 +748,26 @@ the `p-0007`-style ids depend on — are untouched.
 | `fsnv2_apply_player_audit(jsonb, boolean)` | what the script writes, per column and counted |
 | `fsnv2_player_audit_status()` | a standing view: what is still missing, per franchise |
 
-Both existing write paths were hardened rather than merely backfilled:
+Both write paths keep every guard `0006` gave them and gain the identity columns,
+so the two sets of rules compose instead of taking turns:
 
-- **`fsnv2_upsert_players`** (the anon seed) canonicalizes the code, refuses a
-  non-franchise, and keeps a `team_source` of `nflverse`/`provider` rather than
-  letting a client push downgrade it. Projections, ADP and VOR still come from the
-  client — those are the pool's own numbers.
-- **`fsnv2_sync_players`** (the provider path) canonicalizes every code, no longer
-  overwrites a stored franchise with `FA` when a payload cannot be resolved (a
-  roster feed only lists rostered players, so that means "the payload did not
-  say"), carries the provider's identity columns through instead of dropping them,
-  and **propagates a verified team to the hand-maintained row for the same player,
-  matched by `espn_id`** — the ID lookup that was missing. It also returns
-  `unmapped_teams` so a mapper regression shows up in the sync log.
+- **`fsnv2_upsert_players`** (the anon seed) still takes `team` from the synced
+  pool when that pool knows the player. Added: an audited team
+  (`team_source = 'nflverse'`) outranks the client too — which covers the one
+  class of player the provider pool has never heard of, and is the only place the
+  external reference can hold — and a code that is not a franchise never lands.
+  Projections, ADP and VOR still come from the client; those are the pool's own
+  numbers.
+- **`fsnv2_sync_players`** (the provider path) still overwrites `team` from the
+  roster it read the player off and still calls `fsnv2_refresh_player_teams()`
+  once the batch lands. Added: the provider's identity columns are carried through
+  instead of dropped; a payload that names *no* franchise no longer overwrites a
+  stored one with `FA` (a roster feed only lists rostered players, so that means
+  "the payload did not say"); and a verified team is propagated between the two
+  rows for one player **by `espn_id`**, which reaches the rows whose names
+  disagree and `fsnv2_player_key()` therefore cannot match. It also returns
+  `unmapped_teams`, so a mapper regression shows up in the sync log instead of
+  quietly filing a roster under `FA`.
 
 One trap worth recording: the apply function's counters were first computed in the
 UPDATE's `RETURNING` clause, which yields the **NEW** row — so `p.espn_id is null`
@@ -660,15 +778,21 @@ statement snapshot.
 
 ### The Tank01 mapper
 
-`mapRosterPlayer` now resolves a franchise in an explicit order: the entry's own
-abbreviation, then the abbreviation of the roster it was found on, then its
-numeric `teamID` looked up in a `teamID → teamAbv` index built from the same
-payload. `canonicalTeam()` rejects anything numeric outright, so a team id can no
-longer become a team code — and the flat `getNFLPlayerList` fallback, which names
-no roster at all, now resolves through that index instead of guessing. The mapper
-also carries `espn_id`, `sleeper_id`, `rotowire_id` and a headshot through, so the
-audit's keys stay fresh between runs. An unresolvable team is logged and sent as
-`FA`, which the RPC reads as "leave what is stored".
+Team resolution is unchanged from **Team affiliations** above — the enclosing
+roster first, the entry's own fields only in the flat-list fallback, the `teamID`
+dictionary behind both. What the audit adds is identity: `mapRosterPlayer` now
+carries `espn_id`, `sleeper_id`, `gsis_id`, `rotowire_id` and a headshot through,
+so the keys the audit matches on stay fresh between runs without it having to
+re-derive them from the reference every time.
+
+Tank01 keys players by their ESPN id, so `playerID` **is** the `espn_id` — which
+is why `tank01-3917315` and `espn_id` `3917315` are the same man, and why an id
+match is available for every provider row with no crosswalk lookup at all.
+
+`canonicalTeam()` in `lib/services/teams.ts` also refuses anything numeric, so a
+`teamID` reaching a column that holds franchises is now impossible at both ends:
+the mapper resolves it through the dictionary, and the SQL rejects it if anything
+ever slips past.
 
 ## Running locally
 
@@ -696,13 +820,15 @@ and odd team counts, on-the-clock indexing through the turn, next-up previews,
 clock expiry (ADP pick, clean advance, single fire), full-draft roster legality,
 undo and hydration.
 
-`tests/season.test.mjs` (42 assertions) covers the schedule — 84 games, six a
+`tests/season.test.mjs` (51 assertions) covers the schedule — 84 games, six a
 week, every team once a week, all 66 pairings exactly once across weeks 1-11,
 weeks 12-14 as valid perfect matchings with the sides swapped — the shuffle
 vectors read back from Postgres, the score engine (totals equal the sum of the
 starters; scores sit near but not on the projection), the standings invariants
-(wins balance losses, league Points For equals Points Against) and the
-persistence round trip.
+(wins balance losses, league Points For equals Points Against), the NFL matchup
+layer (both game shapes parsed, home and away agreeing on each side, `BYE` only
+inside a synced week, `—` when nothing is synced, feed spellings folded, and the
+live pool's team beating the seed's) and the persistence round trip.
 
 `npm run test:sync-data` verifies the ingestion layer in four phases and exits 0
 on a machine with no credentials and no network:
