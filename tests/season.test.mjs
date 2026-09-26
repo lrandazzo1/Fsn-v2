@@ -548,7 +548,7 @@ test('all 32 franchises are known and every player team resolves', () => {
   const { engine } = draftedSeason();
   assert.equal(NFL_ABBRS.length, 32);
   Object.values(engine.playersById).forEach((player) => {
-    assert.ok(NFL_ABBRS.includes(player.team), `unknown NFL team: ${player.team}`);
+    assert.ok(player.team === 'FA' || NFL_ABBRS.includes(player.team), `unknown NFL team: ${player.team}`);
   });
 });
 

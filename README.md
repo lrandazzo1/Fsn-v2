@@ -37,7 +37,9 @@ js/types.js             Player / Team / Pick / DraftState shapes + roster slot t
 js/playerData.js        Offline fallback pool (compact tuples -> Player objects)
 js/liveData.js          Maps the synced rows onto the pool / projection / slate shapes
 js/playerAssets.js      Player imagery: headshot URLs and the avatar's fallback cascade
-js/vorMath.js           Replacement levels, VOR, tiers, derived ADP, scarcity, recommendations
+js/vorMath.js           Replacement levels, VOR, tiers, scarcity, value indicator
+js/sleeperMarket.js     Sleeper ADP / search-rank mapping and market comparator
+api/draft-ranks.js      Daily cached Sleeper player metadata for the draft room
 js/draftTimer.js        The pick clock (injectable scheduler so tests run instantly)
 js/draftEngine.js       Snake state machine: pick progression, clock expiry, bots, undo, hydrate
 js/seasonEngine.js      Round-robin schedule, weekly score engine, W-L / PF / PA standings
@@ -126,8 +128,8 @@ under the franchise that actually owns it.
 `js/draftTimer.js` counts down from `timer_seconds` (60 by default) and fires
 `onExpire` exactly once at zero. On expiry the engine:
 
-1. calls `bestAvailableByAdp()` — the lowest ADP number still on the board that
-   fits an open roster slot;
+1. calls `bestAvailableByAdp()` — the lowest Sleeper ADP (or search rank when
+   ADP is absent) that fits an open roster slot and early position limits;
 2. records the pick with `source: 'timer_expiry'`;
 3. advances `currentPick`, restarts the clock for the next team, and emits
    `change` + `expire` so the board, next-up strip and rosters repaint.
@@ -921,7 +923,7 @@ on a machine with no credentials and no network:
    `--live` and a `SUPABASE_SERVICE_ROLE_KEY` it upserts, re-upserts and reads
    back through `fsnv2_sync_status`. Without those it reports both as skipped.
 
-`tests/draft-sim.test.mjs` drafts all 180 picks — alternating VOR bot picks and
+`tests/draft-sim.test.mjs` drafts all 180 picks — alternating market bot picks and
 simulated clock expiries — prints the board by round, verifies the order, and
 writes `tests/out/draft-sim.json`. With `--db` it pushes every pick through
 `fsnv2_record_pick` and reads the board back. That payload can also be replayed
@@ -933,11 +935,13 @@ straight into Postgres (the file header has the SQL).
 framework preset, no build command.
 **Vercel CLI:** `npx vercel deploy --prod`.
 
-The app itself is static. `vercel.json` adds one serverless function — the weekly
-sync cron — so a Vercel deployment runs `npm run build:api` to bundle it, and
-serves the repository root as-is for everything else. That function is the only
-part of the deployment that needs environment variables (see *Scheduled runs on
-Vercel* above).
+The app itself is static. `vercel.json` adds the weekly sync cron and
+`api/draft-ranks.js` provides a daily cached slice of Sleeper's player map.
+The checked-in `js/sleeperRanksSnapshot.js` is an offline fallback; refresh it
+with `npm run sync:draft-ranks`. Sleeper currently leaves the scoring-specific
+`adp_*` fields empty for many players, so the UI labels its `search_rank`
+fallback as a Sleeper rank rather than an observed ADP. Projections remain
+synthetic, and VOR is only a value indicator, never a draft sort key.
 
 > Projections in `js/playerData.js` are synthetic sample data. The background
 > sync service above is the production path: point `SPORTS_DATA_PROVIDER` at a

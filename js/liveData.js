@@ -121,7 +121,9 @@ export function buildLivePool(rows) {
       vorRank: 0,
       posRank: 0,
       tier: 1,
-      adp: 0,
+      sleeperAdp: row.stats?.sleeper_adp ?? null,
+      searchRank: row.stats?.search_rank ?? null,
+      adp: 999,
       draftedBy: null,
       pickNumber: null
     }))

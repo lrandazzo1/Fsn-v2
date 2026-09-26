@@ -21,7 +21,9 @@
  * @property {number}   vorRank       Overall rank by VOR (1 = best).
  * @property {number}   posRank       Rank within position (1 = best).
  * @property {number}   tier          Tier bucket within position (1 = elite).
- * @property {number}   adp           Derived average draft position.
+ * @property {number|null} sleeperAdp Sleeper scoring-specific ADP, when supplied.
+ * @property {number|null} searchRank Sleeper search rank, when supplied.
+ * @property {number}   adp           Effective market rank (999 when missing).
  * @property {string|null} headshotUrl Player headshot (fsnv2.players.headshot_url).
  * @property {string|null} espnId      ESPN player id, when the audit resolved one.
  * @property {number|null} draftedBy  Team id that rostered the player, or null.
@@ -133,7 +135,9 @@ export function createPlayer(input) {
     vorRank: input.vorRank ?? 0,
     posRank: input.posRank ?? 0,
     tier: input.tier ?? 1,
-    adp: input.adp ?? 0,
+    sleeperAdp: input.sleeperAdp ?? null,
+    searchRank: input.searchRank ?? null,
+    adp: input.adp ?? 999,
     // Imagery is merged in from the database (js/playerAssets.js) — the local
     // pool has none, so the fields exist and start null rather than missing.
     headshotUrl: input.headshotUrl ?? null,
