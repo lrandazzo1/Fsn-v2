@@ -61,5 +61,10 @@ const sleeperExempt = mapSleeperMarket([{ id: 'ex', name: 'Exempt Back', positio
   'Exempt Back': { team: 'GB', status: 'IR', adp_ppr: 1 }
 });
 assert.ok(sleeperExempt[0].adp >= 151, 'Sleeper status also demotes an inactive player');
+const providerOut = mapSleeperMarket([{ id: 'out', name: 'Josh Jacobs', position: 'RB', team: 'GB',
+  projection: 265, status: 'Active', injuryStatus: 'Out', draftedBy: null }], {
+  'Josh Jacobs': { team: 'GB', status: 'Active', injury_status: 'NA', search_rank: 20 }
+});
+assert.ok(providerOut[0].adp >= 151, 'current provider Out demotes a stale Sleeper top-20 rank');
 
 console.log('Sleeper market mapping, board, bot, and free agent checks passed');

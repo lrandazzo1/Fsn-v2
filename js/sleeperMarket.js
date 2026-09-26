@@ -6,7 +6,7 @@ export const FREE_AGENT_RANK_FLOOR = 220;
 export const INACTIVE_DRAFT_RANK_FLOOR = 151;
 
 export function draftRestricted(player) {
-  return ['EX', 'SUS', 'IR'].includes(inactiveStatus(player));
+  return ['EX', 'SUS', 'IR', 'OUT'].includes(inactiveStatus(player));
 }
 
 export function validRank(value) {
