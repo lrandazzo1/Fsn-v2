@@ -13,6 +13,9 @@ for (const [id, row] of Object.entries(all)) {
   if (!wanted.has(row.full_name)) continue;
   selected[row.full_name] = {
     player_id: id, team: row.team ?? null,
+    status: row.status ?? null,
+    injury_status: row.injury_status ?? null,
+    news_status: row.news_status ?? null,
     search_rank: row.search_rank ?? null,
     adp_ppr: row.adp_ppr ?? null,
     adp_half_ppr: row.adp_half_ppr ?? null,

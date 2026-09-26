@@ -1,6 +1,13 @@
 /** Sleeper market fields are distinct from our projection and VOR ranks. */
+import { inactiveStatus } from './statsEngine.js';
+
 export const MISSING_MARKET_RANK = 999;
 export const FREE_AGENT_RANK_FLOOR = 220;
+export const INACTIVE_DRAFT_RANK_FLOOR = 151;
+
+export function draftRestricted(player) {
+  return ['EX', 'SUS', 'IR'].includes(inactiveStatus(player));
+}
 
 export function validRank(value) {
   const rank = Number(value);
@@ -9,7 +16,8 @@ export function validRank(value) {
 }
 
 export function marketRank(player) {
-  return validRank(player.sleeperAdp) ?? validRank(player.searchRank) ?? MISSING_MARKET_RANK;
+  const rank = validRank(player.sleeperAdp) ?? validRank(player.searchRank) ?? MISSING_MARKET_RANK;
+  return draftRestricted(player) ? Math.max(rank, INACTIVE_DRAFT_RANK_FLOOR) : rank;
 }
 
 export function compareMarket(a, b) {
@@ -32,10 +40,17 @@ export function mapSleeperMarket(players, records, scoringType = 'ppr') {
     const sleeperAdp = unsigned && adp !== null ? Math.max(adp, FREE_AGENT_RANK_FLOOR) : adp;
     const effectiveSearchRank = unsigned && searchRank !== null
       ? Math.max(searchRank, FREE_AGENT_RANK_FLOOR) : searchRank;
-    return {
+    // A current provider designation wins over a generic Sleeper Active label.
+    const statusSource = inactiveStatus(player) ? player : record || player;
+    const mapped = {
       ...player, team, sleeperId: record?.player_id ?? null,
+      status: statusSource.status ?? player.status,
+      injuryStatus: statusSource.injuryStatus ?? statusSource.injury_status ?? player.injuryStatus,
+      newsStatus: statusSource.newsStatus ?? statusSource.news_status ?? player.newsStatus,
       sleeperAdp, searchRank: effectiveSearchRank,
       adp: sleeperAdp ?? effectiveSearchRank ?? MISSING_MARKET_RANK
     };
+    mapped.adp = marketRank(mapped);
+    return mapped;
   });
 }
