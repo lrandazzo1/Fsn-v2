@@ -296,8 +296,18 @@ export interface Tank01Options {
   name?: string;
 }
 
+export interface PlayerStatusRow {
+  id: string;
+  name: string | null;
+  status: string | null;
+  injury_status: string | null;
+  news_status: string | null;
+}
+
 export function createTank01Provider(options: Tank01Options): SportsDataProvider & {
-  fetchLiveWeek(context: ProviderContext): Promise<{ games: GameRow[]; stats: WeeklyStatRow[] }>;
+  fetchLiveWeek(context: ProviderContext, options?: { includeStatuses?: boolean }): Promise<{
+    games: GameRow[]; stats: WeeklyStatRow[]; statuses: PlayerStatusRow[]
+  }>;
 } {
   const { env } = options;
   const logger = options.logger ?? silentLogger;
@@ -433,6 +443,11 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
       string,
       unknown
     >;
+    const reportedInjury = {
+      ...injury,
+      injury_status: row.injury_status ?? injury.injury_status,
+      news_status: row.news_status ?? injury.news_status
+    };
 
     const espnId = text(row.espnID) ?? (/^\d+$/.test(externalId) ? externalId : null);
 
@@ -456,8 +471,9 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
         'FA',
       nfl_team_external_id: fallbackTeamId ?? text(row.teamID),
       jersey: text(row.jerseyNum),
-      status: text(injury.designation) ?? text(row.status) ?? 'Active',
-      injury,
+      status: text(row.injury_status) ?? text(injury.designation) ?? text(row.news_status)
+        ?? text(row.status) ?? 'Active',
+      injury: reportedInjury,
       bye_week: bye,
       age: optionalNum(row.age),
       experience: text(row.exp),
@@ -829,7 +845,30 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
     return rows;
   }
 
-  async function fetchLiveWeek(context: ProviderContext): Promise<{ games: GameRow[]; stats: WeeklyStatRow[] }> {
+  async function fetchPlayerStatuses(): Promise<PlayerStatusRow[]> {
+    try {
+      const list = await get('playerList');
+      return asRecords(list).filter((row) => fantasyPosition(row.pos ?? row.position))
+        .map((row) => {
+          const injury = row.injury && typeof row.injury === 'object'
+            ? row.injury as Record<string, unknown> : {};
+          return {
+            id: `${name}-${text(row.playerID) ?? text(row.__key) ?? ''}`,
+            name: text(row.longName) ?? text(row.espnName),
+            status: text(row.status),
+            injury_status: text(row.injury_status) ?? text(injury.designation),
+            news_status: text(row.news_status) ?? text(injury.news_status)
+          };
+        }).filter((row) => row.id !== `${name}-`);
+    } catch (error) {
+      logger.warn('current player statuses unavailable', { error: (error as Error).message });
+      return [];
+    }
+  }
+
+  async function fetchLiveWeek(context: ProviderContext, options: { includeStatuses?: boolean } = {}): Promise<{
+    games: GameRow[]; stats: WeeklyStatRow[]; statuses: PlayerStatusRow[]
+  }> {
     const week = assertWeek(context.week, 'week');
     const games = await fetchWeekGames(context, week);
     const started = games.filter((game) => game.status === 'in_progress' || game.status === 'final');
@@ -841,7 +880,11 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
       if (homeId) teams.set(homeId, game.home_team);
       if (awayId) teams.set(awayId, game.away_team);
     }
-    return { games, stats: await boxScoresForGames(context, week, started, teams) };
+    const [stats, statuses] = await Promise.all([
+      boxScoresForGames(context, week, started, teams),
+      options.includeStatuses ? fetchPlayerStatuses() : Promise.resolve([])
+    ]);
+    return { games, stats, statuses };
   }
 
   return {

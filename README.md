@@ -193,7 +193,11 @@ the browser. Results are cached for 60 seconds, and a failed refresh keeps the
 last successful snapshot. The server scores skill-player PPR stats locally;
 K/DST retain the provider's scoring rules. An active NFL player shows a LIVE
 badge, accumulated points and the weekly projection. Team actual totals count
-starters only. Simulated results remain separate from the live snapshot.
+starters only. The current player list supplies status fields: EXEMPT,
+SUSPENDED, OUT and IR receive a red badge and a zero active-week projection.
+Opening a completed earlier week requests its box scores and displays recorded
+starter points. Until a complete result arrives, the matchup shows pending
+actuals instead of a season-average estimate.
 
 `#/matchups` is the Phase 1 matchup panel grown into its own screen:
 

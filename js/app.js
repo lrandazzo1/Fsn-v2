@@ -69,7 +69,9 @@ const engine = new DraftEngine({
 const season = new SeasonEngine({
   engine,
   weeks: CONFIG.season.weeks,
-  seed: CONFIG.season.seed
+  seed: CONFIG.season.seed,
+  activeNflWeek: CONFIG.sportsData.enabled
+    ? getCurrentNFLWeek(new Date(), CONFIG.sportsData.season) : null
 });
 
 const repo = new DraftRepository({ onStatus: (status) => renderSyncStatus(status) });
@@ -133,7 +135,8 @@ async function init() {
     onSimulateThrough: simulateThrough,
     onResetSeason: resetSeason
   });
-  views.team = createTeamView({ engine, season, ui, router });
+  views.team = createTeamView({ engine, season, ui, router,
+    onWeekChange: (week) => void liveMatchupStats.fetchWeek(week) });
 
   season.on('change', onSeasonChange);
   ui.week = defaultMatchupWeek();
@@ -148,7 +151,10 @@ async function init() {
 
   await restoreDraft();
   await restoreSeason();
-  if (CONFIG.sportsData.enabled) liveMatchupStats.start();
+  if (CONFIG.sportsData.enabled) {
+    liveMatchupStats.start();
+    void liveMatchupStats.fetchWeek(ui.week);
+  }
 }
 
 function defaultMatchupWeek() {
@@ -415,6 +421,9 @@ async function resetSeason() {
 
 function onRouteChange({ name }) {
   ui.route = name;
+  if (CONFIG.sportsData.enabled && (name === 'matchups' || name === 'team')) {
+    void liveMatchupStats.fetchWeek(ui.week);
+  }
   document.querySelectorAll('.view').forEach((section) => {
     section.hidden = section.dataset.view !== name;
   });

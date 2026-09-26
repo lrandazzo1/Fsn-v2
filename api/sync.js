@@ -768,6 +768,11 @@ function createTank01Provider(options) {
     const position = fantasyPosition(row.pos ?? row.position);
     if (!externalId || !name2 || !position) return null;
     const injury = row.injury && typeof row.injury === "object" ? row.injury : {};
+    const reportedInjury = {
+      ...injury,
+      injury_status: row.injury_status ?? injury.injury_status,
+      news_status: row.news_status ?? injury.news_status
+    };
     const espnId = text(row.espnID) ?? (/^\d+$/.test(externalId) ? externalId : null);
     return {
       external_id: externalId,
@@ -784,8 +789,8 @@ function createTank01Provider(options) {
       team: knownTeamAbbr(fallbackTeam) ?? knownTeamAbbr(row.teamAbv) ?? knownTeamAbbr(row.team) ?? index.get(text(fallbackTeamId) ?? text(row.teamID) ?? "") ?? "FA",
       nfl_team_external_id: fallbackTeamId ?? text(row.teamID),
       jersey: text(row.jerseyNum),
-      status: text(injury.designation) ?? text(row.status) ?? "Active",
-      injury,
+      status: text(row.injury_status) ?? text(injury.designation) ?? text(row.news_status) ?? text(row.status) ?? "Active",
+      injury: reportedInjury,
       bye_week: bye,
       age: optionalNum(row.age),
       experience: text(row.exp),
@@ -1055,7 +1060,25 @@ function createTank01Provider(options) {
     }
     return rows;
   }
-  async function fetchLiveWeek(context) {
+  async function fetchPlayerStatuses() {
+    try {
+      const list = await get("playerList");
+      return asRecords(list).filter((row) => fantasyPosition(row.pos ?? row.position)).map((row) => {
+        const injury = row.injury && typeof row.injury === "object" ? row.injury : {};
+        return {
+          id: `${name}-${text(row.playerID) ?? text(row.__key) ?? ""}`,
+          name: text(row.longName) ?? text(row.espnName),
+          status: text(row.status),
+          injury_status: text(row.injury_status) ?? text(injury.designation),
+          news_status: text(row.news_status) ?? text(injury.news_status)
+        };
+      }).filter((row) => row.id !== `${name}-`);
+    } catch (error) {
+      logger.warn("current player statuses unavailable", { error: error.message });
+      return [];
+    }
+  }
+  async function fetchLiveWeek(context, options2 = {}) {
     const week = assertWeek(context.week, "week");
     const games = await fetchWeekGames(context, week);
     const started = games.filter((game) => game.status === "in_progress" || game.status === "final");
@@ -1067,7 +1090,11 @@ function createTank01Provider(options) {
       if (homeId) teams.set(homeId, game.home_team);
       if (awayId) teams.set(awayId, game.away_team);
     }
-    return { games, stats: await boxScoresForGames(context, week, started, teams) };
+    const [stats, statuses] = await Promise.all([
+      boxScoresForGames(context, week, started, teams),
+      options2.includeStatuses ? fetchPlayerStatuses() : Promise.resolve([])
+    ]);
+    return { games, stats, statuses };
   }
   return {
     name,

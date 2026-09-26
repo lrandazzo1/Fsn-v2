@@ -33,10 +33,12 @@ export async function handleLiveMatchupRequest(
     let task = pending.get(key);
     if (!task) {
       const provider = options.provider ?? createTank01Provider({ env });
-      task = provider.fetchLiveWeek({ season, week: selected, seasonType: 'reg', scoringFormat: 'ppr' })
-        .then(({ games, stats }) => ({
+      task = provider.fetchLiveWeek({ season, week: selected, seasonType: 'reg', scoringFormat: 'ppr' },
+        { includeStatuses: selected === currentNflWeek(now, season) })
+        .then(({ games, stats, statuses }) => ({
           season, week: selected, updatedAt: new Date().toISOString(),
           games: games.map((game) => ({ home: game.home_team, away: game.away_team, status: game.status })),
+          statuses: statuses ?? [],
           players: stats.map((row) => ({
             id: row.player_id, name: row.name, position: row.position, team: row.team,
             actualPoints: row.position === 'DST'

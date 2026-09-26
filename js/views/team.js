@@ -10,6 +10,7 @@
 
 import { annotatePlayers, playerOpponentLabel } from '../nflTeams.js';
 import { ROSTER_SLOTS } from '../types.js';
+import { inactiveBadge } from '../statsEngine.js';
 import {
   badge,
   escapeHtml,
@@ -21,7 +22,7 @@ import {
   renderTeamOptions
 } from '../uiRenderer.js';
 
-export function createTeamView({ engine, season, ui, router }) {
+export function createTeamView({ engine, season, ui, router, onWeekChange = () => {} }) {
   const el = {
     name: document.getElementById('teamName'),
     sub: document.getElementById('teamSub'),
@@ -45,6 +46,7 @@ export function createTeamView({ engine, season, ui, router }) {
   el.week.addEventListener('change', (event) => {
     ui.week = Number(event.target.value);
     render();
+    onWeekChange(ui.week);
   });
 
   function enter(params = {}) {
@@ -108,7 +110,9 @@ export function createTeamView({ engine, season, ui, router }) {
 
     const opponentId = season.opponentOf(week, team.id);
     const opponent = engine.teamById(opponentId);
-    const final = game.status === 'final' && !season.hasLiveScores(week);
+    const pending = season.isHistoricalWeek(week) && !season.hasCompletedBoxScores(week);
+    const final = season.isHistoricalWeek(week)
+      ? !pending : game.status === 'final' && !season.hasLiveScores(week);
 
     const mine = season.displayTotal(week, team.id);
     const theirs = season.displayTotal(week, opponentId);
@@ -124,13 +128,13 @@ export function createTeamView({ engine, season, ui, router }) {
         <div class="matchup__side ${margin >= 0 ? 'is-leading' : ''}">
           <span class="matchup__abbr">${team.abbr} · ${escapeHtml(season.recordLabel(team.id))}</span>
           <span class="matchup__name">${escapeHtml(team.name)}</span>
-          <span class="matchup__score">${mine.toFixed(1)}</span>
+          <span class="matchup__score">${pending ? '—' : mine.toFixed(1)}</span>
         </div>
-        <span class="matchup__vs">${final ? 'final' : season.hasLiveScores(week) ? 'actual' : 'vs'}</span>
+        <span class="matchup__vs">${pending ? 'awaiting stats' : final ? 'final' : season.hasLiveScores(week) ? 'actual' : 'vs'}</span>
         <div class="matchup__side ${margin < 0 ? 'is-leading' : ''}">
           <span class="matchup__abbr">${opponent.abbr} · ${escapeHtml(season.recordLabel(opponentId))}</span>
           <span class="matchup__name">${escapeHtml(opponent.name)}</span>
-          <span class="matchup__score">${theirs.toFixed(1)}</span>
+          <span class="matchup__score">${pending ? '—' : theirs.toFixed(1)}</span>
         </div>
       </div>
 
@@ -138,7 +142,7 @@ export function createTeamView({ engine, season, ui, router }) {
         <span style="width:${(mine / total) * 100}%"></span>
       </div>
       <p class="matchup__verdict">
-        ${final
+        ${pending ? 'Historical box scores are pending.' : final
           ? `${escapeHtml(margin >= 0 ? team.name : opponent.name)} won by <strong>${Math.abs(margin).toFixed(1)}</strong>.`
           : `<strong>${winPct}%</strong> win probability · projected ${season.projectedTotal(team.id, week).toFixed(1)} vs ${season.projectedTotal(opponentId, week).toFixed(1)}.`}
       </p>
@@ -154,17 +158,17 @@ export function createTeamView({ engine, season, ui, router }) {
               <div class="matchup__row">
                 <span class="matchup__player ${minePts >= themPts ? 'is-win' : ''}">
                   ${me
-                    ? `${playerAvatar(me, { size: 'xs' })}<span class="matchup__player-name">${escapeHtml(me.name)}</span> <small>${escapeHtml(playerOpponentLabel(me, week))}</small>`
+                    ? `${playerAvatar(me, { size: 'xs' })}<span class="matchup__player-name">${escapeHtml(me.name)}</span>${!season.isHistoricalWeek(week) ? inactiveBadge(me) : ''} <small>${escapeHtml(playerOpponentLabel(me, week))}</small>`
                     : '<em>empty</em>'}
                   ${!final && me && season.liveStatusFor(week, me) === 'in_progress' ? '<em class="live-badge">LIVE</em>' : ''}
-                  <b>${me ? minePts.toFixed(1) : '—'}${!final && me && season.hasLiveScores(week) ? `<small>Proj ${season.weeklyProjection(me, week).toFixed(1)}</small>` : ''}</b>
+                  <b>${me && minePts !== null ? minePts.toFixed(1) : '—'}${!final && !pending && me && season.hasLiveScores(week) ? `<small>Proj ${season.weeklyProjection(me, week).toFixed(1)}</small>` : ''}</b>
                 </span>
                 <span class="matchup__slot">${badge(slot.label === 'FLEX' ? 'FLEX' : slot.label, true)}</span>
                 <span class="matchup__player is-right ${themPts > minePts ? 'is-win' : ''}">
-                  <b>${them ? themPts.toFixed(1) : '—'}${!final && them && season.hasLiveScores(week) ? `<small>Proj ${season.weeklyProjection(them, week).toFixed(1)}</small>` : ''}</b>
+                  <b>${them && themPts !== null ? themPts.toFixed(1) : '—'}${!final && !pending && them && season.hasLiveScores(week) ? `<small>Proj ${season.weeklyProjection(them, week).toFixed(1)}</small>` : ''}</b>
                   ${!final && them && season.liveStatusFor(week, them) === 'in_progress' ? '<em class="live-badge">LIVE</em>' : ''}
                   ${them
-                    ? `<small>${escapeHtml(playerOpponentLabel(them, week))}</small> <span class="matchup__player-name">${escapeHtml(them.name)}</span>${playerAvatar(them, { size: 'xs' })}`
+                    ? `<small>${escapeHtml(playerOpponentLabel(them, week))}</small> <span class="matchup__player-name">${escapeHtml(them.name)}</span>${!season.isHistoricalWeek(week) ? inactiveBadge(them) : ''}${playerAvatar(them, { size: 'xs' })}`
                     : '<em>empty</em>'}
                 </span>
               </div>`;
@@ -182,9 +186,10 @@ export function createTeamView({ engine, season, ui, router }) {
   /** Actual points once the week is final, the weekly projection until then. */
   function slotPoints(week, player, final) {
     if (!player) return 0;
+    if (season.isHistoricalWeek(week)) return season.scoreFor(week, player.id);
     if (!final) return season.livePointFor(week, player) ?? (season.hasLiveScores(week) ? 0 : season.weeklyProjection(player, week));
     const scored = season.scoreFor(week, player.id);
-    return scored === null ? season.weeklyProjection(player, week) : scored;
+    return scored === null ? 0 : scored;
   }
 
   function playerIn(id, slotKey) {
