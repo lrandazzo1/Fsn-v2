@@ -233,6 +233,13 @@ export function createSportsDataService(
 
       const players = await provider.fetchPlayers(context);
       const playerCounts = await repository.upsertPlayers(players);
+      // Only a complete 32-franchise snapshot may clear old roster assignments.
+      // A partial API response must never turn the missing franchises into FAs.
+      const released = teams.length === 32 && players.length > 0
+        ? await repository.reconcilePlayerRoster(
+            players.filter((player) => player.team !== 'FA').map((player) => player.external_id)
+          )
+        : 0;
 
       return {
         fetched: teams.length + players.length,
@@ -242,7 +249,8 @@ export function createSportsDataService(
           teams_written: teamCounts.inserted + teamCounts.updated,
           players: players.length,
           players_written: playerCounts.inserted + playerCounts.updated,
-          players_skipped: playerCounts.skipped
+          players_skipped: playerCounts.skipped,
+          players_released: released
         }
       };
     });

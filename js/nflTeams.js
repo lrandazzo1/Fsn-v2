@@ -80,6 +80,12 @@ export function teamLogoUrl(abbr) {
   return `${LOGO_BASE}/${(meta.slug || abbr).toLowerCase()}.png`;
 }
 
+/** Player team metadata is independent of headshot URLs and historical assets. */
+export function playerTeamLabel(player) {
+  const team = player && Object.hasOwn(player, 'teamAbv') ? player.teamAbv : player?.team;
+  return typeof team === 'string' && team.trim() ? team.trim().toUpperCase() : 'FA';
+}
+
 /* --------------------------------------------------------- weekly opponents */
 
 /**

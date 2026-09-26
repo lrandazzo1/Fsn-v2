@@ -12,7 +12,7 @@
  * read the same week.
  */
 
-import { opponentLabel, teamColor, teamLogoUrl } from '../nflTeams.js';
+import { opponentLabel, playerTeamLabel, teamColor, teamLogoUrl } from '../nflTeams.js';
 import { badge, escapeHtml, refreshIcons, renderTeamOptions } from '../uiRenderer.js';
 
 export function createMatchupView({ engine, season, ui, router, onSimulateWeek, onSimulateThrough, onResetSeason }) {
@@ -245,13 +245,14 @@ export function createMatchupView({ engine, season, ui, router, onSimulateWeek, 
       return `<span class="h2h__player is-empty">${right ? '' : '<em>Empty</em>'}<b>—</b>${right ? '<em>Empty</em>' : ''}</span>`;
     }
 
+    const team = playerTeamLabel(player);
     const meta = `
       <span class="h2h__player-main">
         <span class="h2h__player-name">${escapeHtml(player.name)}</span>
-        <span class="h2h__player-meta">${player.position} · ${escapeHtml(opponentLabel(player.team, week))}</span>
+        <span class="h2h__player-meta">${player.position} · ${escapeHtml(team === 'FA' ? 'FA' : opponentLabel(team, week))}</span>
       </span>`;
     const pts = `<b class="${winning ? 'is-win' : ''}">${fmt(points)}</b>`;
-    const logo = teamLogoHtml(player.team);
+    const logo = teamLogoHtml(team);
 
     return `<span class="h2h__player${winning ? ' is-win' : ''}">${
       right ? `${pts}${meta}${logo}` : `${logo}${meta}${pts}`
@@ -323,6 +324,7 @@ export function createMatchupView({ engine, season, ui, router, onSimulateWeek, 
  * degrades to the chip instead of a broken-image icon.
  */
 function teamLogoHtml(abbr) {
+  if (abbr === 'FA') return '<span class="team-logo team-logo--fa" title="Free Agent"><span class="team-logo__abbr">FA</span></span>';
   const url = teamLogoUrl(abbr);
   return `
     <span class="team-logo" style="--team-color:${teamColor(abbr)}" title="${escapeHtml(abbr)}">

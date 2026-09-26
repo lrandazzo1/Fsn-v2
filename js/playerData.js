@@ -114,7 +114,7 @@ export const RAW_PLAYERS = [
   ['A.J. Brown', 'WR', 'PHI', 270],
   ['Tee Higgins', 'WR', 'CIN', 262],
   ['Ladd McConkey', 'WR', 'LAC', 258],
-  ['Tyreek Hill', 'WR', 'MIA', 255],
+  ['Tyreek Hill', 'WR', 'FA', 255],
   ['Garrett Wilson', 'WR', 'NYJ', 252],
   ['Davante Adams', 'WR', 'LAR', 248],
   ['Mike Evans', 'WR', 'TB', 245],

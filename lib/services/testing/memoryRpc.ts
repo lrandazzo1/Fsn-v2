@@ -161,10 +161,29 @@ export function createMemoryRpc(): MemoryRpc {
           (existing, row) => ({
             ...existing,
             ...row,
+            team: String(row.team ?? '').trim().toUpperCase() || 'FA',
+            nfl_team_external_id: !row.team || String(row.team).toUpperCase() === 'FA'
+              ? null : row.nfl_team_external_id ?? null,
             id: row.id ?? `${provider}-${String(row.external_id)}`,
             provider
           })
         );
+      }
+
+      case 'fsnv2_reconcile_player_roster': {
+        const provider = requireProvider(name, args);
+        const active = new Set(args.p_active_ids as string[]);
+        let changed = 0;
+        for (const player of store.players.values()) {
+          if (player.provider !== provider || active.has(String(player.external_id)) || player.team === 'FA') continue;
+          player.team = 'FA';
+          player.nfl_team_external_id = null;
+          player.bye_week = null;
+          player.jersey = null;
+          player.status = 'Free Agent';
+          changed += 1;
+        }
+        return changed;
       }
 
       case 'fsnv2_sync_projections': {
