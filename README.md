@@ -69,7 +69,8 @@ scripts/test-sync-data.ts  Sync verification CLI (npm run test:sync-data)
 scripts/audit-players.ts   Player audit CLI (npm run audit:players)
 scripts/test-audit-players.ts  Audit verification CLI (npm run test:audit)
 supabase/migrations/    Schema + RPC migrations (0004 adds the sync tables, 0005 the derivations,
-                        0006 the team refresh, 0007 player identity + headshots)
+                        0006 the team refresh, 0007 player identity + headshots,
+                        0008 the saved lineup + swap RPC)
 tests/engine.test.mjs   41 assertions: snake order, clock expiry, rosters, hydration
 tests/season.test.mjs   51 assertions: schedule, simulation, standings, NFL matchups, hydration
 tests/player-assets.test.mjs  19 assertions: headshot transform, avatar markup, onError cascade
@@ -324,10 +325,16 @@ Applied to the Supabase project **FSN** as `fsnv2_draft_engine_schema`,
 tables and RPCs — apply it before the first sync run. Tables live in a dedicated `fsnv2` schema so they
 never collide with the existing `public.*` tables.
 
-**Apply them in order, all six.** `0006_fsnv2_player_team_refresh.sql` is not
+**Apply them in order, all eight.** `0006_fsnv2_player_team_refresh.sql` is not
 optional: without it `fsnv2_upsert_players` still carries its original 0002
 body, and the browser overwrites every synced roster on each page load (see
-[Team affiliations](#team-affiliations) below). Every
+[Team affiliations](#team-affiliations) below).
+`0008_fsnv2_lineup_swaps.sql` adds `fsnv2.lineups` and the two RPCs behind
+`/api/roster/swap`; without it every lineup swap fails with `Could not find the
+function public.fsnv2_swap_lineup(...) in the schema cache`, which is PostgREST
+saying the function is not on the project rather than anything about the
+request. It ends with `notify pgrst, 'reload schema'` so the new RPCs are
+callable as soon as it is applied. Every
 migration is idempotent, so re-applying one on a project that already has it is
 a no-op.
 

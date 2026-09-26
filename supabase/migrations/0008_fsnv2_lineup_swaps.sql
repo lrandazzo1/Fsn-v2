@@ -131,3 +131,9 @@ $$;
 grant execute on function public.fsnv2_lineup_state(uuid, integer),
   public.fsnv2_swap_lineup(uuid, integer, text, text, text, text, integer)
 to anon, authenticated;
+
+-- PostgREST resolves RPCs from a cached copy of the catalog, so a freshly
+-- created function is invisible (PGRST202: "Could not find the function
+-- public.fsnv2_swap_lineup(...) in the schema cache") until the cache is
+-- refreshed. Ask for the refresh here so applying the migration is enough.
+notify pgrst, 'reload schema';

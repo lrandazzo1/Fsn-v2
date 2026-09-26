@@ -111,6 +111,35 @@ await swapHandler({ method: 'POST', body: {
   toPlayerId: expected.WR1, expectedVersion: -1
 } }, res);
 assert.equal(res.statusCode, 400);
+
+// PostgREST matches an RPC by the exact key set, so the signature in
+// migration 0008 and the keys this route sends have to stay identical.
+assert.deepEqual(Object.keys(requestBody).sort(), [
+  'p_draft_id', 'p_expected_version', 'p_from', 'p_from_player',
+  'p_team_id', 'p_to', 'p_to_player'
+]);
+
+// PGRST202 once (a stale schema cache) is retried, not surfaced.
+const swap = { draftId, teamId, from: 'WR1', to: 'WR2',
+  fromPlayerId: expected.WR1, toPlayerId: expected.WR2, expectedVersion: 1 };
+const missing = { ok: false, status: 404, json: async () => ({ code: 'PGRST202',
+  message: 'Could not find the function public.fsnv2_swap_lineup(...) in the schema cache' }) };
+let calls = 0;
+global.fetch = async () => (++calls === 1 ? missing : { ok: true, json: async () => ({ roster: expected, version: 3 }) });
+await swapHandler({ method: 'POST', body: swap }, res);
+assert.equal(calls, 2);
+assert.equal(res.statusCode, 200);
+assert.equal(res.body.version, 3);
+
+// Still missing after the retry: the migration is not on the project. Say that
+// rather than repeating PostgREST's wording in the toast.
+calls = 0;
+global.fetch = async () => { calls += 1; return missing; };
+await swapHandler({ method: 'POST', body: swap }, res);
+assert.equal(calls, 2);
+assert.equal(res.statusCode, 503);
+assert.match(res.body.error, /0008_fsnv2_lineup_swaps\.sql/);
+
 global.fetch = previousFetch;
 if (previousUrl === undefined) delete process.env.SUPABASE_URL;
 else process.env.SUPABASE_URL = previousUrl;
