@@ -360,14 +360,21 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
       unknown
     >;
 
+    // A present, empty team field is an explicit free-agent signal. Otherwise
+    // the containing active roster outranks an embedded historical team code.
+    const hasTeam = Object.hasOwn(row, 'teamAbv') || Object.hasOwn(row, 'team');
+    const reportedTeam = Object.hasOwn(row, 'teamAbv') ? row.teamAbv : row.team;
+    const explicit = hasTeam ? teamAbbr(reportedTeam) : null;
+    const team = explicit === 'FA' ? 'FA' : teamAbbr(fallbackTeam ?? explicit);
+
     return {
       external_id: externalId,
       name,
       position,
-      team: teamAbbr(row.team ?? fallbackTeam),
-      nfl_team_external_id: text(row.teamID) ?? fallbackTeamId,
+      team,
+      nfl_team_external_id: team === 'FA' ? null : fallbackTeamId ?? text(row.teamID),
       jersey: text(row.jerseyNum),
-      status: text(injury.designation) ?? text(row.status) ?? 'Active',
+      status: team === 'FA' ? 'Free Agent' : text(injury.designation) ?? text(row.status) ?? 'Active',
       injury,
       bye_week: bye,
       age: optionalNum(row.age),
@@ -396,6 +403,10 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
     const teams = asRecords(body);
     const players: PlayerRow[] = [];
     const seen = new Set<string>();
+
+    if (teams.length === 32 && teams.some((team) => asRecords(team.Roster ?? team.roster).length === 0)) {
+      throw new Error('incomplete NFL roster snapshot: a franchise has no roster entries');
+    }
 
     for (const team of teams) {
       const abbr = text(team.teamAbv);

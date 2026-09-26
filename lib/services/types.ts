@@ -193,6 +193,7 @@ export interface SyncRepository {
   readonly target: string;
   upsertTeams(rows: TeamRow[]): Promise<UpsertCount>;
   upsertPlayers(rows: PlayerRow[]): Promise<UpsertCount>;
+  reconcilePlayerRoster(activeIds: string[]): Promise<number>;
   upsertProjections(rows: ProjectionRow[]): Promise<UpsertCount>;
   upsertWeeklyStats(rows: WeeklyStatRow[]): Promise<UpsertCount>;
   upsertSchedules(rows: GameRow[]): Promise<UpsertCount>;

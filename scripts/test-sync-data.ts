@@ -30,7 +30,7 @@ import { currentNflWeek, currentSeason, readEnv, seasonKickoff, weekFocus } from
 import { handleSyncRequest, weeklyPlan } from '../lib/api/syncRoute.ts';
 import { createLogger, silentLogger } from '../lib/services/logger.ts';
 import { createSupabaseSyncRepository } from '../lib/services/syncRepository.ts';
-import { listProviders, resolveProvider } from '../lib/services/providers/index.ts';
+import { createTank01Provider, listProviders, resolveProvider } from '../lib/services/providers/index.ts';
 import { createMemoryRpc } from '../lib/services/testing/memoryRpc.ts';
 import type { SportsDataEnv } from '../lib/services/env.ts';
 import type { RpcTransport } from '../lib/services/syncRepository.ts';
@@ -205,6 +205,28 @@ async function phaseConfiguration(): Promise<void> {
 
 async function phaseMapping(): Promise<void> {
   section('2. Provider payloads map onto the database schema');
+
+  await check('explicit null, empty and FA roster teams override legacy team metadata', async () => {
+    const entries = [null, '', 'FA', 'MIA', undefined].map((team, index) => ({
+      playerID: String(index + 1), longName: `Player ${index + 1}`, pos: 'WR',
+      ...(team === undefined ? {} : { team }), teamID: '15',
+      espnHeadshot: 'https://example.test/headshots/MIA/player.png'
+    }));
+    const provider = createTank01Provider({
+      env: fixtureEnv(),
+      http: {
+        calls: 0,
+        async getJson() {
+          return { url: '', status: 200, durationMs: 0, json: { body: [
+            { teamID: '17', teamAbv: 'NYJ', Roster: entries }
+          ] } };
+        }
+      }
+    });
+    const players = await provider.fetchPlayers(fixtureContext());
+    assert.deepEqual(players.map((player) => player.team), ['FA', 'FA', 'FA', 'NYJ', 'NYJ']);
+    assert.deepEqual(players.slice(0, 3).map((player) => player.nfl_team_external_id), [null, null, null]);
+  });
 
   await check('getNFLTeams → teams, with bye week, division and logo', async () => {
     const teams = await fixtureProvider().fetchTeams(fixtureContext());
@@ -393,6 +415,42 @@ async function phaseMapping(): Promise<void> {
 
 async function phaseDatabase(): Promise<void> {
   section('3. Database writes are UPSERTs (in-memory RPC double)');
+
+  await check('complete roster reconciliation releases absent players without restoring old teams', async () => {
+    const memory = createMemoryRpc();
+    const repository = createSupabaseSyncRepository({ provider: 'fixture', rpc: memory.rpc });
+    await repository.upsertPlayers([
+      { external_id: 'hill', name: 'Tyreek Hill', position: 'WR', team: 'MIA' },
+      { external_id: 'active', name: 'Active Player', position: 'WR', team: 'NYJ' }
+    ]);
+    assert.equal(await repository.reconcilePlayerRoster(['active']), 1);
+    assert.equal(memory.store.players.get('fixture:hill')?.team, 'FA');
+    assert.equal(memory.store.players.get('fixture:hill')?.nfl_team_external_id, null);
+    assert.equal(await repository.reconcilePlayerRoster(['active']), 0);
+  });
+
+  await check('sync only reconciles after a complete 32-team snapshot', async () => {
+    const memory = createMemoryRpc();
+    const repository = createSupabaseSyncRepository({ provider: 'fixture', rpc: memory.rpc });
+    await repository.upsertPlayers([{ external_id: 'hill', name: 'Tyreek Hill', position: 'WR', team: 'MIA' }]);
+    const base = fixtureProvider();
+    const full = createSportsDataService({
+      env: fixtureEnv(), repository,
+      provider: {
+        ...base,
+        fetchTeams: async () => Array.from({ length: 32 }, (_, i) => ({
+          external_id: String(i + 1), abbr: `T${i + 1}`
+        }))
+      }
+    });
+    assert.equal((await full.syncPlayersAndRosters()).detail.players_released, 1);
+    assert.equal(memory.store.players.get('fixture:hill')?.team, 'FA');
+
+    await repository.upsertPlayers([{ external_id: 'hill', name: 'Tyreek Hill', position: 'WR', team: 'MIA' }]);
+    const partial = createSportsDataService({ env: fixtureEnv(), repository, provider: base });
+    assert.equal((await partial.syncPlayersAndRosters()).detail.players_released, 0);
+    assert.equal(memory.store.players.get('fixture:hill')?.team, 'MIA');
+  });
 
   await check('syncPlayersAndRosters writes teams and players, then updates in place', async () => {
     const memory = createMemoryRpc();

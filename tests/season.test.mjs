@@ -21,7 +21,7 @@ import {
   roundRobinRounds,
   winProbability
 } from '../js/seasonEngine.js';
-import { NFL_ABBRS, nflOpponent, opponentLabel } from '../js/nflTeams.js';
+import { NFL_ABBRS, nflOpponent, opponentLabel, playerTeamLabel, teamLogoUrl } from '../js/nflTeams.js';
 
 /* --------------------------------------------------------------- harness -- */
 
@@ -513,8 +513,16 @@ test('all 32 franchises are known and every player team resolves', () => {
   const { engine } = draftedSeason();
   assert.equal(NFL_ABBRS.length, 32);
   Object.values(engine.playersById).forEach((player) => {
-    assert.ok(NFL_ABBRS.includes(player.team), `unknown NFL team: ${player.team}`);
+    assert.ok(player.team === 'FA' || NFL_ABBRS.includes(player.team), `unknown NFL team: ${player.team}`);
   });
+});
+
+test('free agents keep an FA label and no franchise logo', () => {
+  const engine = new DraftEngine({ scheduler: manualScheduler });
+  const tyreek = Object.values(engine.playersById).find((player) => player.name === 'Tyreek Hill');
+  assert.equal(playerTeamLabel(tyreek), 'FA');
+  assert.equal(teamLogoUrl(playerTeamLabel(tyreek)), null);
+  assert.equal(playerTeamLabel({ teamAbv: null, team: 'MIA' }), 'FA');
 });
 
 test('each NFL team has exactly one opponent a week, and it is mutual', () => {

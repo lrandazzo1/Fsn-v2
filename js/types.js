@@ -125,7 +125,7 @@ export function createPlayer(input) {
     id: input.id,
     name: input.name,
     position: input.position,
-    team: input.team,
+    team: (Object.hasOwn(input, 'teamAbv') ? input.teamAbv : input.team) || 'FA',
     projection: input.projection,
     vor: input.vor ?? 0,
     vorRank: input.vorRank ?? 0,

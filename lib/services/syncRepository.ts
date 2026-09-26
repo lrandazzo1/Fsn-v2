@@ -213,6 +213,16 @@ export function createSupabaseSyncRepository(
     target: injected ? 'injected-rpc' : url,
     upsertTeams: (rows: TeamRow[]) => upsertBatched('fsnv2_sync_nfl_teams', 'p_teams', rows),
     upsertPlayers: (rows: PlayerRow[]) => upsertBatched('fsnv2_sync_players', 'p_players', rows),
+    async reconcilePlayerRoster(activeIds: string[]): Promise<number> {
+      const count = await postRpc('fsnv2_reconcile_player_roster', {
+        p_provider: options.provider,
+        p_active_ids: activeIds
+      });
+      if (typeof count !== 'number' || !Number.isInteger(count) || count < 0) {
+        throw new RpcError('fsnv2_reconcile_player_roster', 200, 'expected a non-negative count');
+      }
+      return count;
+    },
     upsertProjections: (rows: ProjectionRow[]) =>
       upsertBatched('fsnv2_sync_projections', 'p_rows', rows),
     upsertWeeklyStats: (rows: WeeklyStatRow[]) =>
@@ -264,6 +274,7 @@ export function createDryRunRepository(logger: Logger = silentLogger): SyncRepos
     target: 'dry-run',
     upsertTeams: count,
     upsertPlayers: count,
+    reconcilePlayerRoster: () => Promise.resolve(0),
     upsertProjections: count,
     upsertWeeklyStats: count,
     upsertSchedules: count,

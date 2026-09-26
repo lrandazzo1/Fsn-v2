@@ -624,14 +624,18 @@ function createTank01Provider(options) {
     const position = fantasyPosition(row.pos ?? row.position);
     if (!externalId || !name2 || !position) return null;
     const injury = row.injury && typeof row.injury === "object" ? row.injury : {};
+    const hasTeam = Object.hasOwn(row, "teamAbv") || Object.hasOwn(row, "team");
+    const reportedTeam = Object.hasOwn(row, "teamAbv") ? row.teamAbv : row.team;
+    const explicit = hasTeam ? teamAbbr(reportedTeam) : null;
+    const team = explicit === "FA" ? "FA" : teamAbbr(fallbackTeam ?? explicit);
     return {
       external_id: externalId,
       name: name2,
       position,
-      team: teamAbbr(row.team ?? fallbackTeam),
-      nfl_team_external_id: text(row.teamID) ?? fallbackTeamId,
+      team,
+      nfl_team_external_id: team === "FA" ? null : fallbackTeamId ?? text(row.teamID),
       jersey: text(row.jerseyNum),
-      status: text(injury.designation) ?? text(row.status) ?? "Active",
+      status: team === "FA" ? "Free Agent" : text(injury.designation) ?? text(row.status) ?? "Active",
       injury,
       bye_week: bye,
       age: optionalNum(row.age),
@@ -1105,6 +1109,16 @@ function createSupabaseSyncRepository(options) {
     target: injected ? "injected-rpc" : url,
     upsertTeams: (rows) => upsertBatched("fsnv2_sync_nfl_teams", "p_teams", rows),
     upsertPlayers: (rows) => upsertBatched("fsnv2_sync_players", "p_players", rows),
+    async reconcilePlayerRoster(activeIds) {
+      const count = await postRpc("fsnv2_reconcile_player_roster", {
+        p_provider: options.provider,
+        p_active_ids: activeIds
+      });
+      if (typeof count !== "number" || !Number.isInteger(count) || count < 0) {
+        throw new RpcError("fsnv2_reconcile_player_roster", 200, "expected a non-negative count");
+      }
+      return count;
+    },
     upsertProjections: (rows) => upsertBatched("fsnv2_sync_projections", "p_rows", rows),
     upsertWeeklyStats: (rows) => upsertBatched("fsnv2_sync_weekly_stats", "p_rows", rows),
     upsertSchedules: (rows) => upsertBatched("fsnv2_sync_schedules", "p_games", rows),
@@ -1144,6 +1158,7 @@ function createDryRunRepository(logger = silentLogger) {
     target: "dry-run",
     upsertTeams: count,
     upsertPlayers: count,
+    reconcilePlayerRoster: () => Promise.resolve(0),
     upsertProjections: count,
     upsertWeeklyStats: count,
     upsertSchedules: count,
@@ -1283,6 +1298,9 @@ function createSportsDataService(options = {}) {
       const teamCounts = await repository.upsertTeams(teams);
       const players = await provider.fetchPlayers(context);
       const playerCounts = await repository.upsertPlayers(players);
+      const released = teams.length === 32 && players.length > 0 ? await repository.reconcilePlayerRoster(
+        players.filter((player) => player.team !== "FA").map((player) => player.external_id)
+      ) : 0;
       return {
         fetched: teams.length + players.length,
         counts: [teamCounts, playerCounts],
@@ -1291,7 +1309,8 @@ function createSportsDataService(options = {}) {
           teams_written: teamCounts.inserted + teamCounts.updated,
           players: players.length,
           players_written: playerCounts.inserted + playerCounts.updated,
-          players_skipped: playerCounts.skipped
+          players_skipped: playerCounts.skipped,
+          players_released: released
         }
       };
     });
