@@ -33,6 +33,7 @@ import {
   teamAbbr,
   text
 } from '../normalize.ts';
+import { canonicalTeam, espnHeadshotUrl } from '../teams.ts';
 import type {
   GameRow,
   PlayerRow,
@@ -211,11 +212,11 @@ export function defenseFantasyPoints(entry: Record<string, unknown>): number | n
  * `teamAbv`, so that comes first, and a numeric key is only ever a last resort.
  */
 function defenseTeamAbbr(entry: Record<string, unknown>): string | null {
-  const explicit = text(entry.teamAbv) ?? text(entry.team);
-  if (explicit && !/^\d+$/.test(explicit)) return teamAbbr(explicit, explicit);
+  const explicit = canonicalTeam(entry.teamAbv) ?? canonicalTeam(entry.team);
+  if (explicit) return explicit;
 
   const key = text(entry.__key);
-  if (key && !/^\d+$/.test(key) && !/^(home|away)$/i.test(key)) return teamAbbr(key, key);
+  if (key && !/^(home|away)$/i.test(key)) return canonicalTeam(key);
   return null;
 }
 
@@ -344,11 +345,48 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
 
   /* ---------------------------------------------------------------- players */
 
+  /**
+   * A roster entry's franchise, resolved in order of how much each source can be
+   * trusted — and never from a number.
+   *
+   *   1. the entry's own abbreviation (`teamAbv`, then `team`)
+   *   2. the abbreviation of the roster it was found on
+   *   3. its numeric `teamID`, looked up in the index built from this same
+   *      payload's `teamID -> teamAbv` pairs
+   *
+   * Step 3 is the fix for the defect this whole audit chased. `teamID` is a
+   * provider-internal number ("21"), and the flat `getNFLPlayerList` fallback
+   * carries no abbreviation at all — so a mapper that passed `teamID` through as
+   * a team code (or that read the numeric key of a payload keyed by team id)
+   * stored the number as the franchise. `canonicalTeam()` now rejects anything
+   * numeric outright, and the id is resolved through the index instead of being
+   * hoped about.
+   */
+  function rosterTeam(
+    row: Record<string, unknown>,
+    fallbackTeam: string | null,
+    teamIdIndex: Map<string, string>
+  ): string | null {
+    const direct = canonicalTeam(row.teamAbv) ?? canonicalTeam(row.team);
+    if (direct) return direct;
+
+    const fromRoster = canonicalTeam(fallbackTeam);
+    if (fromRoster) return fromRoster;
+
+    const teamId = text(row.teamID) ?? text(row.team);
+    if (teamId) {
+      const mapped = teamIdIndex.get(teamId);
+      if (mapped) return mapped;
+    }
+    return null;
+  }
+
   function mapRosterPlayer(
     row: Record<string, unknown>,
     fallbackTeam: string | null,
     fallbackTeamId: string | null,
-    bye: number | null
+    bye: number | null,
+    teamIdIndex: Map<string, string> = new Map()
   ): PlayerRow | null {
     const externalId = text(row.playerID) ?? text(row.__key);
     const name = text(row.longName) ?? text(row.espnName) ?? text(row.cbsShortName);
@@ -360,11 +398,28 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
       unknown
     >;
 
+    const team = rosterTeam(row, fallbackTeam, teamIdIndex);
+    if (!team) {
+      logger.warn('no franchise could be resolved for a roster entry', {
+        player: name,
+        external_id: externalId,
+        team_field: text(row.team) ?? text(row.teamAbv),
+        team_id: text(row.teamID) ?? null
+      });
+    }
+
+    // Tank01 keys players by their ESPN id, so `playerID` *is* the espn_id — the
+    // single most useful thing this feed contributes to reconciliation. Its other
+    // crosswalk ids are carried through where the payload has them.
+    const espnId = text(row.espnID) ?? (/^\d+$/.test(externalId) ? externalId : null);
+
     return {
       external_id: externalId,
       name,
       position,
-      team: teamAbbr(row.team ?? fallbackTeam),
+      // 'FA' only when nothing in the payload named a franchise; the sync RPC
+      // reads that as "the payload did not say" and keeps whatever is stored.
+      team: team ?? 'FA',
       nfl_team_external_id: text(row.teamID) ?? fallbackTeamId,
       jersey: text(row.jerseyNum),
       status: text(injury.designation) ?? text(row.status) ?? 'Active',
@@ -373,6 +428,11 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
       age: optionalNum(row.age),
       experience: text(row.exp),
       college: text(row.school) ?? text(row.college),
+      espn_id: espnId,
+      sleeper_id: text(row.sleeperBotID) ?? text(row.sleeperID),
+      gsis_id: text(row.gsisID) ?? text(row.nflID),
+      rotowire_id: text(row.rotoWirePlayerID) ?? text(row.rotowireID),
+      headshot_url: text(row.espnHeadshot) ?? espnHeadshotUrl(espnId),
       adp: null,
       stats: {},
       raw: row
@@ -397,13 +457,28 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
     const players: PlayerRow[] = [];
     const seen = new Set<string>();
 
+    // teamID -> abbreviation, from this payload. The roster entries and the flat
+    // player list both identify a team by this number, so building the index once
+    // is what lets a numeric id be resolved rather than stored.
+    const teamIdIndex = new Map<string, string>();
+    const byeByTeamId = new Map<string, number | null>();
     for (const team of teams) {
-      const abbr = text(team.teamAbv);
+      const teamId = text(team.teamID) ?? text(team.__key);
+      const abbr = canonicalTeam(team.teamAbv) ?? canonicalTeam(team.abbreviation);
+      if (teamId && abbr) teamIdIndex.set(teamId, abbr);
+      if (teamId) byeByTeamId.set(teamId, byeWeek(team.byeWeeks, context.season));
+    }
+    if (teams.length > 0 && teamIdIndex.size === 0) {
+      logger.warn('teams payload carried no resolvable abbreviations', { teams: teams.length });
+    }
+
+    for (const team of teams) {
+      const abbr = canonicalTeam(team.teamAbv);
       const teamId = text(team.teamID);
       const bye = byeWeek(team.byeWeeks, context.season);
       const roster = team.Roster ?? team.roster;
       for (const entry of asRecords(roster)) {
-        const player = mapRosterPlayer(entry, abbr, teamId, bye);
+        const player = mapRosterPlayer(entry, abbr, teamId, bye, teamIdIndex);
         if (!player || seen.has(player.external_id)) continue;
         seen.add(player.external_id);
         players.push(player);
@@ -415,13 +490,27 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
       return players;
     }
 
+    // The flat list names no roster, so the teamID index built above is the only
+    // thing standing between a numeric team id and the team column.
     logger.warn('no rosters in teams payload — falling back to the flat player list');
     const list = await get('playerList');
+    let unresolved = 0;
     for (const entry of asRecords(list)) {
-      const player = mapRosterPlayer(entry, null, null, null);
+      const teamId = text(entry.teamID);
+      const player = mapRosterPlayer(
+        entry,
+        null,
+        teamId,
+        teamId ? byeByTeamId.get(teamId) ?? null : null,
+        teamIdIndex
+      );
       if (!player || seen.has(player.external_id)) continue;
+      if (player.team === 'FA') unresolved += 1;
       seen.add(player.external_id);
       players.push(player);
+    }
+    if (unresolved > 0) {
+      logger.warn('players with no resolvable franchise', { players: unresolved, of: players.length });
     }
     return players;
   }

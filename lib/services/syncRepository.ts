@@ -22,6 +22,8 @@ import { silentLogger } from './logger.ts';
 import { chunk } from './normalize.ts';
 import type {
   GameRow,
+  PlayerAuditApplyCount,
+  PlayerAuditRow,
   PlayerRow,
   ProjectionRow,
   SyncRepository,
@@ -245,7 +247,72 @@ export function createSupabaseSyncRepository(
       }
     },
 
-    status: (limit = 10) => postRpc('fsnv2_sync_status', { p_limit: limit })
+    status: (limit = 10) => postRpc('fsnv2_sync_status', { p_limit: limit }),
+
+    /* ------------------------------------------------------- player audit -- */
+
+    /** Every `fsnv2.players` row the audit reconciles, hand-maintained ones included. */
+    async playersAuditSnapshot(limit?: number): Promise<PlayerAuditRow[]> {
+      const payload = await postRpc('fsnv2_players_audit_snapshot', { p_limit: limit ?? null });
+      if (!Array.isArray(payload)) {
+        throw new RpcError(
+          'fsnv2_players_audit_snapshot',
+          200,
+          `expected an array of players, got ${typeof payload}`
+        );
+      }
+      return payload as PlayerAuditRow[];
+    },
+
+    /**
+     * Applies a reconciled plan in batches. `dryRun` routes to the read-only
+     * preview RPC, so the reported counts come from the same diff the write
+     * would perform rather than from the script's own arithmetic.
+     */
+    async applyPlayerAudit(
+      rows: Array<Record<string, string | null>>,
+      dryRun = false
+    ): Promise<PlayerAuditApplyCount> {
+      const totals: PlayerAuditApplyCount = {
+        matched: 0,
+        updated: 0,
+        missing: 0,
+        total: 0,
+        teams: 0,
+        headshots: 0,
+        ids: 0,
+        jerseys: 0,
+        dry_run: dryRun
+      };
+      if (rows.length === 0) return totals;
+
+      const batches = chunk(rows, batchSize);
+      for (const [index, batch] of batches.entries()) {
+        // eslint-disable-next-line no-await-in-loop
+        const payload = await postRpc('fsnv2_apply_player_audit', {
+          p_rows: batch,
+          p_dry_run: dryRun
+        });
+        const counts = (payload ?? {}) as Record<string, unknown>;
+        const read = (key: string): number => {
+          const value = counts[key];
+          const parsed = typeof value === 'number' ? value : Number.parseInt(String(value ?? 0), 10);
+          return Number.isFinite(parsed) ? parsed : 0;
+        };
+        for (const key of ['matched', 'updated', 'missing', 'total', 'teams', 'headshots', 'ids', 'jerseys'] as const) {
+          totals[key] += read(key);
+        }
+        logger.debug('audit batch applied', {
+          batch: `${index + 1}/${batches.length}`,
+          updated: read('updated'),
+          dry_run: dryRun
+        });
+      }
+      logger.info(dryRun ? 'audit preview complete' : 'audit applied', { ...totals });
+      return totals;
+    },
+
+    auditStatus: () => postRpc('fsnv2_player_audit_status', {})
   };
 }
 

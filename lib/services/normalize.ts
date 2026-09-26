@@ -7,6 +7,7 @@
  * rather than inside each mapper.
  */
 
+import { canonicalTeam } from './teams.ts';
 import type { FantasyPosition, GameStatus, StatLine } from './types.ts';
 
 /** Tank01 (and most RapidAPI feeds) send every stat as a string. */
@@ -60,11 +61,62 @@ export function fantasyPosition(value: unknown): FantasyPosition | null {
   return POSITION_ALIASES[raw.toUpperCase()] ?? null;
 }
 
-/** Team abbreviations are compared and stored uppercase; free agents are 'FA'. */
+/**
+ * Team abbreviations are stored as one of the 32 canonical codes in teams.ts —
+ * 'ARZ' and 'WSH' become ARI and WAS, nflverse's 'LA' becomes LAR — and free
+ * agents are 'FA'.
+ *
+ * It used to just uppercase whatever it was handed, which is how a provider's
+ * numeric team id (`teamID: 21`) became the team "21" and how the same franchise
+ * ended up stored under two spellings. A value that resolves to no franchise now
+ * falls back instead of being stored verbatim; `canonicalTeam()` is the variant
+ * that reports "unknown" rather than defaulting.
+ */
 export function teamAbbr(value: unknown, fallback = 'FA'): string {
+  return canonicalTeam(value) ?? (fallback === 'FA' ? 'FA' : canonicalTeam(fallback) ?? 'FA');
+}
+
+/** Suffixes that a feed appends to a surname and another feed leaves off. */
+const NAME_SUFFIXES = new Set(['JR', 'SR', 'II', 'III', 'IV', 'V']);
+
+/**
+ * A player's name reduced to what two feeds can be expected to agree on:
+ * lowercase letters only, accents folded, punctuation and generational suffixes
+ * dropped.
+ *
+ *   'Deebo Samuel Sr.'  -> 'deebosamuel'
+ *   "Ja'Marr Chase"     -> 'jamarrchase'
+ *   'A.J. Brown'        -> 'ajbrown'
+ *   'Kenneth Walker III'-> 'kennethwalker'
+ *
+ * Suffix stripping is what the first reconciliation pass was missing: 42 of the
+ * 208 hand-maintained rows failed to match the roster feed purely on 'Sr.',
+ * which left their team assignments frozen at whatever they were seeded with.
+ */
+export function normalizePlayerName(value: unknown): string {
   const raw = text(value);
-  if (!raw) return fallback;
-  return raw.toUpperCase();
+  if (!raw) return '';
+  const words = raw
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+  while (words.length > 1 && NAME_SUFFIXES.has(words[words.length - 1])) words.pop();
+  return words.join('').toLowerCase();
+}
+
+/**
+ * The key a name+position match is made on. Position is part of it because two
+ * players do share a name (there are two Josh Allens), and a name collision
+ * across positions is the one case where a name-only match would be wrong.
+ */
+export function playerMatchKey(name: unknown, position: unknown): string {
+  const normalized = normalizePlayerName(name);
+  if (!normalized) return '';
+  const pos = fantasyPosition(position) ?? text(position)?.toUpperCase() ?? '';
+  return `${normalized}|${pos}`;
 }
 
 const GAME_STATUS_ALIASES: Array<[RegExp, GameStatus]> = [

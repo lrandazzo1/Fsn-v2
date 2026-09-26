@@ -43,6 +43,12 @@ export interface PlayerRow {
   external_id: string;
   name: string;
   position: FantasyPosition;
+  /**
+   * One of the 32 canonical abbreviations (lib/services/teams.ts), or 'FA' when
+   * the payload named no franchise. 'FA' is read by `fsnv2_sync_players` as "the
+   * provider did not say" and leaves a stored team alone, so a mapper that
+   * cannot resolve a team never overwrites a good assignment with a bad one.
+   */
   team: string;
   nfl_team_external_id?: string | null;
   jersey?: string | null;
@@ -54,6 +60,13 @@ export interface PlayerRow {
   college?: string | null;
   adp?: number | null;
   stats?: Record<string, unknown>;
+  /* Cross-feed identity — what the player audit reconciles on. A provider that
+   * publishes none of these is matched by normalized name + position instead. */
+  espn_id?: string | null;
+  sleeper_id?: string | null;
+  gsis_id?: string | null;
+  rotowire_id?: string | null;
+  headshot_url?: string | null;
   raw?: unknown;
 }
 
@@ -189,6 +202,45 @@ export interface SyncResult {
   detail: Record<string, unknown>;
 }
 
+/**
+ * A row of `fsnv2.players` as the audit reads it — what
+ * `fsnv2_players_audit_snapshot` returns. Provider-null rows are the
+ * hand-maintained pool from js/playerData.js; they are in scope precisely
+ * because they are the ones that drift.
+ */
+export interface PlayerAuditRow {
+  id: string;
+  name: string;
+  position: string;
+  team: string | null;
+  provider?: string | null;
+  external_id?: string | null;
+  nfl_team_external_id?: string | null;
+  gsis_id?: string | null;
+  espn_id?: string | null;
+  sleeper_id?: string | null;
+  rotowire_id?: string | null;
+  headshot_url?: string | null;
+  jersey?: string | null;
+  status?: string | null;
+  team_source?: string | null;
+  audited_at?: string | null;
+}
+
+/** What `fsnv2_apply_player_audit` reports back, per column it touched. */
+export interface PlayerAuditApplyCount {
+  matched: number;
+  updated: number;
+  /** Rows in the payload whose id is not in the table. */
+  missing: number;
+  total: number;
+  teams: number;
+  headshots: number;
+  ids: number;
+  jerseys: number;
+  dry_run: boolean;
+}
+
 export interface SyncRepository {
   readonly target: string;
   upsertTeams(rows: TeamRow[]): Promise<UpsertCount>;
@@ -198,6 +250,14 @@ export interface SyncRepository {
   upsertSchedules(rows: GameRow[]): Promise<UpsertCount>;
   logRun(entry: SyncRunLog): Promise<string | null>;
   status(limit?: number): Promise<unknown>;
+  /* The player audit's two halves — read the table, write the reconciled plan.
+   * Optional so a repository double (or the dry-run one) need not implement them. */
+  playersAuditSnapshot?(limit?: number): Promise<PlayerAuditRow[]>;
+  applyPlayerAudit?(
+    rows: Array<Record<string, string | null>>,
+    dryRun?: boolean
+  ): Promise<PlayerAuditApplyCount>;
+  auditStatus?(): Promise<unknown>;
 }
 
 export interface SportsDataService {

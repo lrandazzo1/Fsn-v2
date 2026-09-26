@@ -51,6 +51,10 @@ js/app.js               Boot, state restore, event wiring, control handlers
 lib/services/sportsData.ts        Ingestion facade: the four sync methods
 lib/services/providers/           Provider registry + the Tank01 / RapidAPI fetcher
 lib/services/syncRepository.ts    Batched UPSERTs through the fsnv2_sync_* RPCs
+lib/services/teams.ts             The 32 franchises + every alias the feeds use for them
+lib/services/nflverse.ts          The nflverse reference dataset (rosters + id crosswalk)
+lib/services/playerIdentity.ts    Reconciles fsnv2.players against that reference
+lib/services/csv.ts               RFC 4180 CSV reader (the reference feed quotes its commas)
 lib/services/{env,logger,httpClient,normalize,types}.ts   Config, logging, HTTP, mapping helpers
 lib/fixtures/tank01/    Recorded provider payloads (the `fixture` provider)
 lib/api/syncRoute.ts    The weekly cron handler (bundled to api/sync.js)
@@ -58,7 +62,10 @@ scripts/build-api.mjs   esbuild bundle for that one function
 vercel.json             Build + cron schedule + function limits
 scripts/sync-data.ts    Sync CLI (npm run sync:data)
 scripts/test-sync-data.ts  Sync verification CLI (npm run test:sync-data)
-supabase/migrations/    Schema + RPC migrations (0004 adds the sync tables, 0005 the derivations)
+scripts/audit-players.ts   Player audit CLI (npm run audit:players)
+scripts/test-audit-players.ts  Audit verification CLI (npm run test:audit)
+supabase/migrations/    Schema + RPC migrations (0004 adds the sync tables, 0005 the derivations,
+                        0006 player identity, headshots and the team-code canon)
 tests/engine.test.mjs   41 assertions: snake order, clock expiry, rosters, hydration
 tests/season.test.mjs   42 assertions: schedule, simulation, standings, hydration
 tests/draft-sim.test.mjs Full 15-round simulation + optional database round-trip
@@ -521,6 +528,148 @@ trades a derived value back for the provider's null.
 > forced into a table the season engine owns. Both are read through RPCs, so UI
 > code never has to know which is which.
 
+## Player audit & migration pipeline
+
+The sync keeps rows *fresh*; it did not keep them *right*. Three things went
+wrong at once, and all three came back to the same root cause — `fsnv2.players.team`
+was whatever the last writer said it was, and nothing could tell a franchise code
+from a number:
+
+1. **A provider's numeric team id could land in `team`.** Tank01 keys its roster
+   payload by `teamID`, so a mapper reading the key instead of `teamAbv` stored
+   `"21"` as a franchise — the same class of bug that produced `DST-10` rows
+   before migration `0005`.
+2. **One franchise, several spellings.** ARI/ARZ, WAS/WSH, LAR/LA. A by-team read
+   returns half a roster and nothing errors.
+3. **The hand-maintained pool outranked everything.** `public.fsnv2_upsert_players`
+   is granted to `anon`, so every draft-board load pushed `js/playerData.js` into
+   the table and overwrote `team` from a file. A correction lasted until the next
+   page view — which is how a player who had moved kept reappearing on his old
+   team.
+
+And `headshot_url` did not exist at all, so the UI had nowhere to read a portrait
+from.
+
+### The ground truth
+
+[nflverse](https://github.com/nflverse/nflverse-data) — the community mirror of
+the league's own feeds, the same data `nflreadpy`/`nflreadr` load. Read straight
+from the release assets, so this project needs no Python and no R:
+
+| File | What it answers |
+| --- | --- |
+| `weekly_rosters/roster_weekly_<season>.csv` | who is on which roster, **by week** — the only current view |
+| `rosters/roster_<season>.csv` | the season snapshot, covering anyone the weekly file has not listed |
+| `players/players.csv` | the cumulative id crosswalk (`gsis_id`, `espn_id`, `sleeper_id`, `rotowire_id`) |
+
+Note the URLs: nflverse publishes these as **release assets**, so the
+`raw.githubusercontent.com/.../master/players/players.csv` path 404s. The release
+URLs in `lib/services/nflverse.ts` are what `nflreadr` itself resolves to.
+
+Which file answers "what team is this player on" matters. `players.csv` carries
+`latest_team`, but that is a derived column and it lags; a player's team is taken
+from the **highest week he appears in**, preferring an on-roster row, so a
+mid-season move shows up the week it happens. Downloads are cached on disk, so a
+`--dry-run` followed by the real run costs one download.
+
+### Matching
+
+Descending order of how much each key can be trusted:
+
+| Key | Notes |
+| --- | --- |
+| `espn_id` | including a Tank01 `external_id` — Tank01 keys players **by** their ESPN id, which is why `tank01-3917315` and espn_id `3917315` are the same man |
+| `sleeper_id` / `gsis_id` / `rotowire_id` | whichever the row already carries |
+| normalized name + position | accents folded, punctuation and `Jr./Sr./III` dropped; position guards against the two Josh Allens |
+| franchise, for team defenses | `Vikings D/ST` → MIN; no person's id applies |
+
+An id match wins over a name match even when the names disagree — a name is what
+*changes*, an id is what does not. Suffix stripping is what the first
+reconciliation pass was missing: 42 of the 208 hand-maintained rows failed to
+match on `Sr.` alone, which left their teams frozen at whatever they were seeded
+with (`Deebo Samuel` vs `Deebo Samuel Sr.` is the canonical example).
+
+### What it will and will not overwrite
+
+| Column | Rule |
+| --- | --- |
+| `team` | rewritten only when the reference has the player **on a roster**. Released or retired → keeps his last team and is reported, not blanked; blanking a bench mid-season is worse than a stale code. IR and practice squad *are* on the team, so those do move. |
+| `espn_id` etc. | filled when missing. A **conflicting** id is never overwritten — it is reported, because two feeds disagreeing about identity is a data question, not something a migration should guess at. |
+| `headshot_url` | filled when missing (`--refresh-headshots` to re-point). ESPN's combiner for a player, ESPN's team logo for a DST row. |
+| team code | canonicalized even on a row that matched nothing at all. |
+
+### Running it
+
+```bash
+npm run audit:players:dry            # report the diff, write nothing
+npm run audit:players                # apply
+node scripts/audit-players.ts --only=headshots        # one column at a time
+node scripts/audit-players.ts --refresh-headshots     # re-point every portrait
+node scripts/audit-players.ts --static=js/playerData.js   # also fix the static pool
+node scripts/audit-players.ts --sql-out=audit.sql    # emit SQL, leave the database alone
+node scripts/audit-players.ts --snapshot=players.json --sql-out=audit.sql   # fully offline
+```
+
+`--snapshot` reads the table from a JSON file instead of the RPC, so the audit can
+be run and reviewed on a machine with no service-role key: export the rows once,
+reconcile offline, apply the SQL through the editor. `--dry-run` changes nothing
+anywhere; `--sql-out` only diverts the *database* half, so a run can emit SQL for
+review and still correct the static pool in the working tree.
+
+`--static` matters more than it looks. `js/persistence.js` pushes
+`js/playerData.js` into the table on every draft-board load, so a team left stale
+there is re-applied to the database the next time anyone opens the app. Migration
+`0006` stops it overwriting a verified assignment; correcting the file is what
+stops the two disagreeing at all. Only the third element of each tuple is
+touched, by an anchored per-line replacement, so projections and row order — which
+the `p-0007`-style ids depend on — are untouched.
+
+### The database half (migration `0006`)
+
+| Added | Purpose |
+| --- | --- |
+| `fsnv2.canonical_team(text)` | one spelling per franchise; **NULL** — never a guess — for a numeric team id or an unknown code |
+| `players.gsis_id/espn_id/sleeper_id/rotowire_id` | the cross-feed identity the reconcile step matches on (indexed, deliberately **not** unique — the pool and a provider each keep their own row for the same human) |
+| `players.headshot_url` | the portrait the UI had nowhere to read from |
+| `players.team_source` / `audited_at` | who last set `team`, so a verified assignment outranks a client push |
+| `fsnv2_players_audit_snapshot()` | what the script reads |
+| `fsnv2_preview_player_audit(jsonb)` | the read-only twin — what `--dry-run` reports |
+| `fsnv2_apply_player_audit(jsonb, boolean)` | what the script writes, per column and counted |
+| `fsnv2_player_audit_status()` | a standing view: what is still missing, per franchise |
+
+Both existing write paths were hardened rather than merely backfilled:
+
+- **`fsnv2_upsert_players`** (the anon seed) canonicalizes the code, refuses a
+  non-franchise, and keeps a `team_source` of `nflverse`/`provider` rather than
+  letting a client push downgrade it. Projections, ADP and VOR still come from the
+  client — those are the pool's own numbers.
+- **`fsnv2_sync_players`** (the provider path) canonicalizes every code, no longer
+  overwrites a stored franchise with `FA` when a payload cannot be resolved (a
+  roster feed only lists rostered players, so that means "the payload did not
+  say"), carries the provider's identity columns through instead of dropping them,
+  and **propagates a verified team to the hand-maintained row for the same player,
+  matched by `espn_id`** — the ID lookup that was missing. It also returns
+  `unmapped_teams` so a mapper regression shows up in the sync log.
+
+One trap worth recording: the apply function's counters were first computed in the
+UPDATE's `RETURNING` clause, which yields the **NEW** row — so `p.espn_id is null`
+was false by the time it was evaluated and the function reported
+`updated: 0, teams: 0, headshots: 0` while writing every row correctly. The diff
+now comes from a CTE that joins the payload against `fsnv2.players` in the same
+statement snapshot.
+
+### The Tank01 mapper
+
+`mapRosterPlayer` now resolves a franchise in an explicit order: the entry's own
+abbreviation, then the abbreviation of the roster it was found on, then its
+numeric `teamID` looked up in a `teamID → teamAbv` index built from the same
+payload. `canonicalTeam()` rejects anything numeric outright, so a team id can no
+longer become a team code — and the flat `getNFLPlayerList` fallback, which names
+no roster at all, now resolves through that index instead of guessing. The mapper
+also carries `espn_id`, `sleeper_id`, `rotowire_id` and a headshot through, so the
+audit's keys stay fresh between runs. An unresolvable team is logged and sent as
+`FA`, which the RPC reads as "leave what is stored".
+
 ## Running locally
 
 ES modules require HTTP (not `file://`):
@@ -538,6 +687,7 @@ npm run test:engine    # draft engine only
 npm run test:season    # season matchup engine only
 npm run test:db        # also persist the simulation to Supabase and verify
 npm run test:sync-data # the sports-data ingestion layer (no network, no keys)
+npm run test:audit     # the player audit: team canon, matching, change plan (no network, no keys)
 npm run typecheck      # tsc over api, lib and scripts (needs npm install)
 ```
 
