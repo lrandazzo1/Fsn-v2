@@ -77,6 +77,7 @@ const season = new SeasonEngine({
 const repo = new DraftRepository({ onStatus: (status) => renderSyncStatus(status) });
 const seasonRepo = new SeasonRepository(repo);
 let displayedActiveWeek = getCurrentNFLWeek(new Date(), CONFIG.sportsData.season);
+let liveMatchupsReady = false;
 const liveMatchupStats = useLiveMatchupStats({
   season, engine, seasonYear: CONFIG.sportsData.season,
   onUpdate: (week) => {
@@ -152,6 +153,7 @@ async function init() {
   await restoreDraft();
   await restoreSeason();
   if (CONFIG.sportsData.enabled) {
+    liveMatchupsReady = true;
     liveMatchupStats.start();
     void liveMatchupStats.fetchWeek(ui.week);
   }
@@ -421,7 +423,7 @@ async function resetSeason() {
 
 function onRouteChange({ name }) {
   ui.route = name;
-  if (CONFIG.sportsData.enabled && (name === 'matchups' || name === 'team')) {
+  if (liveMatchupsReady && (name === 'matchups' || name === 'team')) {
     void liveMatchupStats.fetchWeek(ui.week);
   }
   document.querySelectorAll('.view').forEach((section) => {

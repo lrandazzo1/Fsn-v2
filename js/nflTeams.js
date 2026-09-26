@@ -175,6 +175,22 @@ export function setLiveSlate(byWeek) {
   liveSlate = byWeek && byWeek.size ? byWeek : null;
 }
 
+/** Add an authoritative box-score slate without discarding synced weeks. */
+export function mergeLiveSlateWeek(week, games) {
+  if (!Array.isArray(games) || !games.length) return;
+  const slate = {};
+  for (const game of games) {
+    const home = normalizeAbbr(game.home);
+    const away = normalizeAbbr(game.away);
+    if (!NFL_TEAMS[home] || !NFL_TEAMS[away] || home === away) continue;
+    slate[home] = { opponent: away, home: true };
+    slate[away] = { opponent: home, home: false };
+  }
+  if (!Object.keys(slate).length) return;
+  if (!liveSlate) liveSlate = new Map();
+  liveSlate.set(Number(week), { ...liveSlate.get(Number(week)), ...slate });
+}
+
 /** True once a week's real games are loaded — the difference between BYE and '—'. */
 export function hasLiveSlate(week) {
   return Boolean(liveSlate && liveSlate.has(Number(week)));
@@ -224,7 +240,7 @@ export function opponentLabel(abbr, week) {
  */
 export function playerOpponentLabel(player, week) {
   if (!player) return '—';
-  if (player.opponentWeek === Number(week) && player.opponent) return player.opponent;
+  // A box-score slate can arrive after annotatePlayers stamped an unknown week.
   return opponentLabel(player.team, week);
 }
 

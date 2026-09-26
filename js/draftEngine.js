@@ -30,8 +30,7 @@ import {
   createTeam
 } from './types.js';
 import { enrichPlayers, recommendPlayers } from './vorMath.js';
-import { compareMarket } from './sleeperMarket.js';
-import { mapSleeperMarket } from './sleeperMarket.js';
+import { compareMarket, draftRestricted, mapSleeperMarket } from './sleeperMarket.js';
 import { sleeperRanksSnapshot } from './sleeperRanksSnapshot.js';
 import { loadPlayers } from './playerData.js';
 import { PickTimer } from './draftTimer.js';
@@ -351,7 +350,11 @@ export class DraftEngine {
    * @param {number} [teamId] defaults to the team on the clock
    */
   bestAvailableByAdp(teamId = this.currentTeamId) {
-    const available = this.availablePlayers.sort(compareMarket);
+    // An exempt, suspended, or IR player is a late flyer even when the
+    // vendor's old ADP still lists him among the early picks.
+    const available = this.availablePlayers
+      .filter((player) => this.currentPick > 50 || !draftRestricted(player))
+      .sort(compareMarket);
     if (available.length === 0) return null;
     const counts = this.positionCounts(teamId);
     const fits = available.find(
@@ -608,7 +611,7 @@ export class DraftEngine {
   recommendations(teamId = this.currentTeamId, limit = 5) {
     const weights = this.needWeights(teamId);
     const eligible = this.availablePlayers.filter(
-      (player) => weights[player.position] > -900 &&
+      (player) => (this.currentPick > 50 || !draftRestricted(player)) && weights[player.position] > -900 &&
         !this.earlyPositionBlocked(player, this.positionCounts(teamId)) &&
         this.findOpenSlot(teamId, player.position)
     );

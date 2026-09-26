@@ -18,6 +18,9 @@ export default async function handler(req, res) {
         if (!names.has(record.full_name)) continue;
         selected[record.full_name] = {
           player_id: id, team: record.team ?? null,
+          status: record.status ?? null,
+          injury_status: record.injury_status ?? null,
+          news_status: record.news_status ?? null,
           search_rank: record.search_rank ?? null,
           adp_ppr: record.adp_ppr ?? null,
           adp_half_ppr: record.adp_half_ppr ?? null,

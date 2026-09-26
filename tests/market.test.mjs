@@ -41,4 +41,25 @@ assert.equal(engine.botSelection().id, board[0].id);
 assert.equal(engine.autoPick().playerId, board[0].id);
 assert.ok(engine.playersById[find('Tyreek Hill').id].adp >= 220);
 
+const restricted = mapSleeperMarket([
+  { id: 'jacobs', name: 'Josh Jacobs', position: 'RB', team: 'GB', projection: 265,
+    status: 'Active', injuryStatus: 'EXEMPT', draftedBy: null },
+  { id: 'healthy', name: 'Healthy Back', position: 'RB', team: 'ATL', projection: 220,
+    draftedBy: null }
+], {
+  'Josh Jacobs': { team: 'GB', status: 'Active', search_rank: 2, adp_ppr: 2 },
+  'Healthy Back': { team: 'ATL', status: 'Active', search_rank: 35, adp_ppr: 35 }
+});
+assert.ok(marketRank(restricted[0]) >= 151, 'active exempt status outranks a stale top ADP');
+const restrictedEngine = new DraftEngine({ players: restricted, teamCount: 2, rounds: 2,
+  scheduler: { setInterval: () => 1, clearInterval: () => {} } });
+assert.equal(restrictedEngine.botSelection().id, 'healthy');
+restrictedEngine.makePick('healthy');
+assert.equal(restrictedEngine.botSelection(), null, 'first 50 picks cannot auto-select only exempt players');
+const sleeperExempt = mapSleeperMarket([{ id: 'ex', name: 'Exempt Back', position: 'RB', team: 'GB',
+  projection: 200, draftedBy: null }], {
+  'Exempt Back': { team: 'GB', status: 'IR', adp_ppr: 1 }
+});
+assert.ok(sleeperExempt[0].adp >= 151, 'Sleeper status also demotes an inactive player');
+
 console.log('Sleeper market mapping, board, bot, and free agent checks passed');

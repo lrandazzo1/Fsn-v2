@@ -1,4 +1,5 @@
 import { getCurrentNFLWeek } from './nflWeek.js';
+import { mergeLiveSlateWeek } from './nflTeams.js';
 
 /** Browser polling hook for the server's short-lived live box-score snapshot. */
 export function useLiveMatchupStats({ season, engine, seasonYear, onUpdate, fetcher = fetch,
@@ -25,6 +26,7 @@ export function useLiveMatchupStats({ season, engine, seasonYear, onUpdate, fetc
     try {
       const payload = await requestWeek(week);
       if (seq !== sequence) return;
+      mergeLiveSlateWeek(week, payload.games);
       season.setLiveMatchupStats(week, payload, engine.playersById);
       onUpdate?.(week);
     } catch (error) {
@@ -41,6 +43,7 @@ export function useLiveMatchupStats({ season, engine, seasonYear, onUpdate, fetc
     const task = requestWeek(week)
       .then((payload) => {
         if (!payload.games?.length || !payload.games.every((game) => game.status === 'final')) return;
+        mergeLiveSlateWeek(week, payload.games);
         season.setLiveMatchupStats(week, payload, engine.playersById);
       })
       .catch((error) => console.warn(`Week ${week} actual scores unavailable:`, error))

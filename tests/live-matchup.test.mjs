@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { getCurrentNFLWeek } from '../js/nflWeek.js';
 import { SeasonEngine, winProbability } from '../js/seasonEngine.js';
 import { inactiveStatus } from '../js/statsEngine.js';
+import { annotatePlayers, playerOpponentLabel } from '../js/nflTeams.js';
 import { buildLivePool } from '../js/liveData.js';
 import { useLiveMatchupStats } from '../js/useLiveMatchupStats.js';
 import { readEnv } from '../lib/services/env.ts';
@@ -116,8 +117,12 @@ const week2Payload = { ...historicalPayload, week: 2,
 const historyHook = useLiveMatchupStats({ season, engine, seasonYear: 2026,
   fetcher: async (url) => new Response(JSON.stringify(url.endsWith('week=2')
     ? week2Payload : historicalPayload), { status: 200 }) });
+annotatePlayers(playersById, 1);
+assert.equal(playerOpponentLabel(playersById['p-caleb'], 1), '—');
 await historyHook.fetchWeek(1);
 await historyHook.fetchWeek(2);
+assert.equal(playerOpponentLabel(playersById['p-caleb'], 1), 'vs MIN',
+  'a fetched historical box score supplies the slate even after an earlier empty stamp');
 assert.equal(season.scoreFor(1, 'p-caleb'), 11);
 assert.equal(season.displayTotal(1, 1), 11);
 assert.equal(season.displayTotal(1, 2), 26);
