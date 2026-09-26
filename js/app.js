@@ -16,6 +16,8 @@
 import { CONFIG } from './config.js';
 import { DraftEngine } from './draftEngine.js';
 import { createLiveData } from './liveData.js';
+import { getCurrentNFLWeek } from './nflWeek.js';
+import { useLiveMatchupStats } from './useLiveMatchupStats.js';
 import { annotatePlayers, liveSlateWeeks, setLiveSlate } from './nflTeams.js';
 import { loadPlayers } from './playerData.js';
 import { mapSleeperMarket } from './sleeperMarket.js';
@@ -49,7 +51,7 @@ const ui = {
   selectedPlayerId: null,
   route: 'home',
   /** Season state shared by the Matchup hub, the Team page and the dev bar. */
-  week: 1,
+  week: getCurrentNFLWeek(new Date(), CONFIG.sportsData.season),
   /** The week whose NFL matchups are currently stamped onto the player pool. */
   nflWeek: null,
   matchupMode: 'mine',
@@ -67,11 +69,25 @@ const engine = new DraftEngine({
 const season = new SeasonEngine({
   engine,
   weeks: CONFIG.season.weeks,
-  seed: CONFIG.season.seed
+  seed: CONFIG.season.seed,
+  activeNflWeek: CONFIG.sportsData.enabled
+    ? getCurrentNFLWeek(new Date(), CONFIG.sportsData.season) : null
 });
 
 const repo = new DraftRepository({ onStatus: (status) => renderSyncStatus(status) });
 const seasonRepo = new SeasonRepository(repo);
+let displayedActiveWeek = getCurrentNFLWeek(new Date(), CONFIG.sportsData.season);
+const liveMatchupStats = useLiveMatchupStats({
+  season, engine, seasonYear: CONFIG.sportsData.season,
+  onUpdate: (week) => {
+    if (week !== displayedActiveWeek && ui.week === displayedActiveWeek) {
+      ui.week = week;
+      if (ui.route === 'matchups') router.go(`/matchups/${week}`);
+      else refreshView();
+    }
+    displayedActiveWeek = week;
+  }
+});
 
 /** Guards the animated bot loop so two runs never overlap. */
 let simulation = { running: false, cancel: false };
@@ -119,10 +135,11 @@ async function init() {
     onSimulateThrough: simulateThrough,
     onResetSeason: resetSeason
   });
-  views.team = createTeamView({ engine, season, ui, router });
+  views.team = createTeamView({ engine, season, ui, router,
+    onWeekChange: (week) => void liveMatchupStats.fetchWeek(week) });
 
   season.on('change', onSeasonChange);
-  ui.week = season.currentWeek;
+  ui.week = defaultMatchupWeek();
 
   renderSyncStatus({ status: repo.enabled ? 'idle' : 'offline' });
   router.start();
@@ -134,6 +151,15 @@ async function init() {
 
   await restoreDraft();
   await restoreSeason();
+  if (CONFIG.sportsData.enabled) {
+    liveMatchupStats.start();
+    void liveMatchupStats.fetchWeek(ui.week);
+  }
+}
+
+function defaultMatchupWeek() {
+  const active = getCurrentNFLWeek(new Date(), CONFIG.sportsData.season);
+  return CONFIG.sportsData.enabled ? Math.min(active, season.weeks) : season.currentWeek;
 }
 
 /** Refresh the offline board before loading the database's live player pool. */
@@ -203,7 +229,7 @@ async function loadLiveData() {
     .filter((week) => week >= 1 && week <= season.weeks)
     .sort((a, b) => a - b);
   if (covered.length && season.currentWeek === 1 && !season.isWeekPlayed(1)) {
-    ui.week = covered[0];
+    ui.week = defaultMatchupWeek();
   }
 
   // Stamp {player.team, player.opponent} for that week, so the lineup and bench
@@ -318,7 +344,7 @@ async function restoreSeason() {
       const state = await seasonRepo.seasonState();
       if (state?.matchups?.length) {
         season.hydrate({ matchups: state.matchups, scores: state.scores });
-        ui.week = season.currentWeek;
+        ui.week = defaultMatchupWeek();
         refreshView();
         return;
       }
@@ -330,13 +356,13 @@ async function restoreSeason() {
   const local = seasonRepo.loadLocal();
   if (local?.matchups?.length) {
     season.hydrate(local);
-    ui.week = season.currentWeek;
+    ui.week = defaultMatchupWeek();
     refreshView();
   }
 }
 
-function onSeasonChange() {
-  seasonRepo.saveLocal(season.toJSON());
+function onSeasonChange(payload) {
+  if (payload?.reason !== 'live_stats') seasonRepo.saveLocal(season.toJSON());
   refreshView();
 }
 
@@ -395,6 +421,9 @@ async function resetSeason() {
 
 function onRouteChange({ name }) {
   ui.route = name;
+  if (CONFIG.sportsData.enabled && (name === 'matchups' || name === 'team')) {
+    void liveMatchupStats.fetchWeek(ui.week);
+  }
   document.querySelectorAll('.view').forEach((section) => {
     section.hidden = section.dataset.view !== name;
   });

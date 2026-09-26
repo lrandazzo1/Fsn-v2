@@ -1375,6 +1375,18 @@ kbd {
 }
 .h2h__cell.is-right .h2h__player b { text-align: left; }
 .h2h__player b.is-win { color: var(--brand-bright); }
+.h2h__points { display: flex; flex-direction: column; align-items: flex-end; min-width: 52px; }
+.h2h__cell.is-right .h2h__points { align-items: flex-start; }
+.h2h__points small, .game-card__score small, .matchup__player b small {
+  display: block; color: var(--text-faint); font: 9px 'JetBrains Mono', monospace; white-space: nowrap;
+}
+.live-badge { color: #19e5a0; font: 700 9px 'JetBrains Mono', monospace; letter-spacing: .07em; font-style: normal; }
+.inactive-badge {
+  display: inline-block; margin-left: 4px; padding: 1px 4px;
+  border-radius: 3px; background: rgba(239, 68, 68, .16); color: #ff6868;
+  font: 700 9px 'JetBrains Mono', monospace; font-style: normal; vertical-align: middle;
+}
+.game-card__status.is-live { color: #19e5a0; background: rgba(18, 201, 138, .12); }
 .h2h__player.is-empty { color: var(--text-faint); }
 .h2h__player.is-empty em { font-size: 11.5px; flex: 1; }
 

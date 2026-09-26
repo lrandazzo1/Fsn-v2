@@ -25,6 +25,8 @@
  */
 
 import { ROSTER_SLOTS } from './types.js';
+import { playerKey, teamAbbr } from './liveData.js';
+import { inactiveStatus } from './statsEngine.js';
 
 /** Weeks in the fantasy regular season. */
 export const SEASON_WEEKS = 14;
@@ -175,11 +177,13 @@ export class SeasonEngine {
    * @param {number} [options.seed]
    * @param {() => number} [options.random] injectable RNG so tests are stable
    */
-  constructor({ engine, weeks = SEASON_WEEKS, seed = SEASON_SEED, random = Math.random } = {}) {
+  constructor({ engine, weeks = SEASON_WEEKS, seed = SEASON_SEED, random = Math.random,
+    activeNflWeek = null } = {}) {
     this.engine = engine;
     this.weeks = weeks;
     this.seed = seed;
     this.random = random;
+    this.activeNflWeek = activeNflWeek;
 
     /** @type {Map<string, Function[]>} */
     this.listeners = new Map();
@@ -195,6 +199,8 @@ export class SeasonEngine {
      * @type {((player: Object, week: number) => number|null)|null}
      */
     this.liveProjections = null;
+    /** Live box scores are transient and never written into simulated results. */
+    this.liveMatchups = new Map();
 
     this.generate();
   }
@@ -282,24 +288,36 @@ export class SeasonEngine {
     this.liveProjections = typeof lookup === 'function' ? lookup : null;
   }
 
+  setActiveNflWeek(week) {
+    this.activeNflWeek = week;
+  }
+
+  isHistoricalWeek(week) {
+    return this.activeNflWeek !== null && week < this.activeNflWeek;
+  }
+
   /**
    * A player's projected points for one week.
    *
-   * The provider's own weekly number when the sync has it, otherwise the
-   * evenly-spread season projection (season total / 17 games). `week` defaults
-   * to the week the season is on so the older single-argument callers keep
-   * working unchanged.
+   * Live mode uses only the provider's number for the requested week. The
+   * evenly spread season estimate remains available in offline simulation.
+   * Historical weeks never receive a projection.
    *
    * @param {import('./types.js').Player|null} player
    * @param {number} [week]
    */
   weeklyProjection(player, week = this.currentWeek) {
     if (!player) return 0;
+    if (this.isHistoricalWeek(week)) return 0;
+    if (week === this.activeNflWeek && inactiveStatus(player)) return 0;
 
     if (this.liveProjections) {
       const live = this.liveProjections(player, week);
       if (typeof live === 'number' && Number.isFinite(live)) return round1(live);
     }
+    // A live matchup must use the week's published projection, never a
+    // season-wide average masquerading as a game forecast.
+    if (this.activeNflWeek !== null) return 0;
     return round1(player.projection / GAMES_PER_SEASON);
   }
 
@@ -316,8 +334,96 @@ export class SeasonEngine {
 
   /** What a player actually scored in a week, or null if it has not been played. */
   scoreFor(week, playerId) {
+    if (this.isHistoricalWeek(week)) {
+      const snapshot = this.liveMatchups.get(week);
+      if (!this.hasCompletedBoxScores(week)) return null;
+      return snapshot.scores.get(playerId) ?? 0;
+    }
     const value = this.scores.get(`${week}:${playerId}`);
     return value === undefined ? null : value;
+  }
+
+  /** Apply one authoritative snapshot, matching provider ids first and unique names second. */
+  setLiveMatchupStats(week, payload, playersById) {
+    const candidates = new Map();
+    for (const player of Object.values(playersById)) {
+      const key = player.position === 'DST' ? `DST|${teamAbbr(player.team)}` : playerKey(player.name);
+      const list = candidates.get(key) || [];
+      list.push(player);
+      candidates.set(key, list);
+    }
+    if (week === this.activeNflWeek) {
+      for (const row of payload.statuses || []) {
+        const hits = candidates.get(playerKey(row.name)) || [];
+        const player = playersById[row.id] || (hits.length === 1 ? hits[0] : null);
+        if (!player) continue;
+        // A fresh active status must also clear a stale injury designation.
+        player.status = row.status;
+        player.injuryStatus = row.injury_status;
+        player.newsStatus = row.news_status;
+        player.injury = { designation: row.injury_status, news_status: row.news_status };
+      }
+    }
+    const games = new Map();
+    for (const game of payload.games || []) {
+      if (!['in_progress', 'final'].includes(game.status)) continue;
+      games.set(teamAbbr(game.home), game.status);
+      games.set(teamAbbr(game.away), game.status);
+    }
+    const scores = new Map();
+    const playerStatuses = new Map();
+    for (const row of payload.players || []) {
+      const key = row.position === 'DST' || String(row.id || '').includes('DST-')
+        ? `DST|${teamAbbr(row.team)}` : playerKey(row.name);
+      const hits = candidates.get(key) || [];
+      const player = playersById[row.id] || (hits.length === 1 ? hits[0] : null);
+      if (!player || !games.has(teamAbbr(row.team)) || !Number.isFinite(row.actualPoints)) continue;
+      scores.set(player.id, row.actualPoints);
+      playerStatuses.set(player.id, games.get(teamAbbr(row.team)));
+    }
+    this.liveMatchups.set(week, { games, scores, playerStatuses,
+      receivedStats: Boolean(payload.players?.length),
+      complete: Boolean(payload.games?.length) && payload.games.every((game) => game.status === 'final') });
+    if (this.isHistoricalWeek(week) && this.hasCompletedBoxScores(week)) {
+      for (const game of this.matchupsForWeek(week)) {
+        game.teamAScore = this.actualTotal(week, game.teamAId);
+        game.teamBScore = this.actualTotal(week, game.teamBId);
+        game.status = 'final';
+      }
+    }
+    if (week === this.activeNflWeek) {
+      for (const player of Object.values(playersById)) {
+        player.actualPoints = this.livePointFor(week, player);
+        player.projectedPoints = this.weeklyProjection(player, week);
+        player.liveStatus = this.liveStatusFor(week, player);
+      }
+    }
+    this.emit('change', { reason: 'live_stats', week });
+  }
+
+  liveStatusFor(week, player) {
+    if (!player) return null;
+    const snapshot = this.liveMatchups.get(week);
+    return snapshot?.playerStatuses.get(player.id) ?? snapshot?.games.get(teamAbbr(player.team)) ?? null;
+  }
+
+  livePointFor(week, player) {
+    if (!player || !this.hasLiveScores(week) || !this.liveStatusFor(week, player)) return null;
+    return this.liveMatchups.get(week).scores.get(player.id) ?? 0;
+  }
+
+  hasLiveScores(week) {
+    const snapshot = this.liveMatchups.get(week);
+    return Boolean(snapshot?.games.size && snapshot.receivedStats);
+  }
+
+  hasCompletedBoxScores(week) {
+    return this.hasLiveScores(week) && this.liveMatchups.get(week).complete;
+  }
+
+  actualTotal(week, teamId) {
+    return round2(this.lineup(teamId).reduce((total, { player }) =>
+      total + (this.livePointFor(week, player) ?? 0), 0));
   }
 
   /**
@@ -325,6 +431,9 @@ export class SeasonEngine {
    * final, the projection until then.
    */
   displayTotal(week, teamId) {
+    if (this.isHistoricalWeek(week)) return this.hasCompletedBoxScores(week)
+      ? this.actualTotal(week, teamId) : 0;
+    if (this.hasLiveScores(week)) return this.actualTotal(week, teamId);
     const game = this.matchupForTeam(week, teamId);
     if (game && game.status === 'final') {
       return game.teamAId === teamId ? game.teamAScore : game.teamBScore;
@@ -338,7 +447,13 @@ export class SeasonEngine {
    */
   winProbabilityFor(game) {
     if (!game) return 0.5;
-    if (game.status === 'final') {
+    if (this.isHistoricalWeek(game.week)) {
+      if (!this.hasCompletedBoxScores(game.week)) return 0.5;
+      const a = this.actualTotal(game.week, game.teamAId);
+      const b = this.actualTotal(game.week, game.teamBId);
+      return a === b ? 0.5 : a > b ? 1 : 0;
+    }
+    if (game.status === 'final' && !this.hasLiveScores(game.week)) {
       if (game.teamAScore === game.teamBScore) return 0.5;
       return game.teamAScore > game.teamBScore ? 1 : 0;
     }

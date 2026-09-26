@@ -89,6 +89,16 @@ export function buildLivePool(rows) {
 
   /** @type {Map<string, Object>} */
   const best = new Map();
+  const providerStatus = new Map();
+
+  for (const row of rows) {
+    if (!row?.provider) continue;
+    const key = matchKey(row);
+    const prior = providerStatus.get(key);
+    if (!prior || String(row.synced_at || '') > String(prior.synced_at || '')) {
+      providerStatus.set(key, row);
+    }
+  }
 
   for (const row of rows) {
     const projection = Number(row?.stats?.projection ?? 0);
@@ -109,6 +119,10 @@ export function buildLivePool(rows) {
       name: String(row.name),
       position: normalisePosition(row.position),
       team: teamAbbr(row.team),
+      status: providerStatus.get(matchKey(row))?.status ?? row.status ?? null,
+      injury: providerStatus.get(matchKey(row))?.injury ?? row.injury ?? null,
+      injuryStatus: providerStatus.get(matchKey(row))?.injury_status ?? row.injury_status ?? null,
+      newsStatus: providerStatus.get(matchKey(row))?.news_status ?? row.news_status ?? null,
       projection: Number(row.stats.projection),
       byeWeek: row.bye_week ?? null,
       // Imagery, carried explicitly: `headshot_url` and `espn_id` are what the

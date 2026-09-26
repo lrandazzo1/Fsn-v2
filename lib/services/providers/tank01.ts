@@ -140,6 +140,29 @@ function fantasyPointsOf(entry: Record<string, unknown>, format: ScoringFormat):
   return num(fallback);
 }
 
+/** Calculate local PPR points from Tank01's box-score stat groups. */
+export function livePprPoints(stats: StatLine): number | null {
+  const pick = (...keys: string[]) => {
+    for (const key of keys) if (Number.isFinite(stats[key])) return stats[key];
+    return 0;
+  };
+  const relevant = ['passing.passYds', 'passing.passTD', 'rushing.rushYds', 'rushing.rushTD',
+    'receiving.recYds', 'receiving.receptions', 'receiving.recTD', 'passYds', 'passTD',
+    'rushYds', 'rushTD', 'recYds', 'receptions', 'rec', 'recTD'];
+  if (!relevant.some((key) => Number.isFinite(stats[key]))) return null;
+  const points =
+    pick('passing.passYds', 'passYds') * 0.04 +
+    pick('passing.passTD', 'passTD') * 4 +
+    pick('rushing.rushYds', 'rushYds') * 0.1 +
+    pick('rushing.rushTD', 'rushTD') * 6 +
+    pick('receiving.recYds', 'recYds') * 0.1 +
+    pick('receiving.receptions', 'receiving.rec', 'receptions', 'rec') +
+    pick('receiving.recTD', 'recTD') * 6 -
+    (pick('passing.int', 'passing.interceptions', 'interceptionsThrown', 'int') +
+      pick('fumblesLost', 'fumbles.fumblesLost', 'fumbles')) * 2;
+  return Math.round(points * 100) / 100;
+}
+
 /**
  * Team-defense scoring, matching the defensive weights this provider is already
  * asked to use for skill players (see BASE_SCORING) plus the conventional
@@ -273,7 +296,19 @@ export interface Tank01Options {
   name?: string;
 }
 
-export function createTank01Provider(options: Tank01Options): SportsDataProvider {
+export interface PlayerStatusRow {
+  id: string;
+  name: string | null;
+  status: string | null;
+  injury_status: string | null;
+  news_status: string | null;
+}
+
+export function createTank01Provider(options: Tank01Options): SportsDataProvider & {
+  fetchLiveWeek(context: ProviderContext, options?: { includeStatuses?: boolean }): Promise<{
+    games: GameRow[]; stats: WeeklyStatRow[]; statuses: PlayerStatusRow[]
+  }>;
+} {
   const { env } = options;
   const logger = options.logger ?? silentLogger;
   const name = options.name ?? TANK01_PROVIDER_NAME;
@@ -408,6 +443,11 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
       string,
       unknown
     >;
+    const reportedInjury = {
+      ...injury,
+      injury_status: row.injury_status ?? injury.injury_status,
+      news_status: row.news_status ?? injury.news_status
+    };
 
     const espnId = text(row.espnID) ?? (/^\d+$/.test(externalId) ? externalId : null);
 
@@ -431,8 +471,9 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
         'FA',
       nfl_team_external_id: fallbackTeamId ?? text(row.teamID),
       jersey: text(row.jerseyNum),
-      status: text(injury.designation) ?? text(row.status) ?? 'Active',
-      injury,
+      status: text(row.injury_status) ?? text(injury.designation) ?? text(row.news_status)
+        ?? text(row.status) ?? 'Active',
+      injury: reportedInjury,
       bye_week: bye,
       age: optionalNum(row.age),
       experience: text(row.exp),
@@ -728,13 +769,20 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
   async function fetchBoxScores(context: ProviderContext): Promise<WeeklyStatRow[]> {
     const week = assertWeek(context.week, 'week');
     const games = await fetchWeekGames(context, week);
+    return boxScoresForGames(context, week, games);
+  }
+
+  async function boxScoresForGames(
+    context: ProviderContext, week: number, games: GameRow[], knownTeams?: Map<string, string>
+  ): Promise<WeeklyStatRow[]> {
     const playable = games
       .filter((game) => game.status !== 'canceled' && game.status !== 'postponed')
       .slice(0, env.maxGamesPerWeek);
 
     const rows: WeeklyStatRow[] = [];
+    if (playable.length === 0) return rows;
     const seen = new Set<string>();
-    const index = await teamAbbrById();
+    const index = knownTeams ?? await teamAbbrById();
 
     for (const game of playable) {
       // eslint-disable-next-line no-await-in-loop
@@ -797,6 +845,48 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
     return rows;
   }
 
+  async function fetchPlayerStatuses(): Promise<PlayerStatusRow[]> {
+    try {
+      const list = await get('playerList');
+      return asRecords(list).filter((row) => fantasyPosition(row.pos ?? row.position))
+        .map((row) => {
+          const injury = row.injury && typeof row.injury === 'object'
+            ? row.injury as Record<string, unknown> : {};
+          return {
+            id: `${name}-${text(row.playerID) ?? text(row.__key) ?? ''}`,
+            name: text(row.longName) ?? text(row.espnName),
+            status: text(row.status),
+            injury_status: text(row.injury_status) ?? text(injury.designation),
+            news_status: text(row.news_status) ?? text(injury.news_status)
+          };
+        }).filter((row) => row.id !== `${name}-`);
+    } catch (error) {
+      logger.warn('current player statuses unavailable', { error: (error as Error).message });
+      return [];
+    }
+  }
+
+  async function fetchLiveWeek(context: ProviderContext, options: { includeStatuses?: boolean } = {}): Promise<{
+    games: GameRow[]; stats: WeeklyStatRow[]; statuses: PlayerStatusRow[]
+  }> {
+    const week = assertWeek(context.week, 'week');
+    const games = await fetchWeekGames(context, week);
+    const started = games.filter((game) => game.status === 'in_progress' || game.status === 'final');
+    const teams = new Map<string, string>();
+    for (const game of games) {
+      const raw = (game.raw ?? {}) as Record<string, unknown>;
+      const homeId = text(raw.teamIDHome);
+      const awayId = text(raw.teamIDAway);
+      if (homeId) teams.set(homeId, game.home_team);
+      if (awayId) teams.set(awayId, game.away_team);
+    }
+    const [stats, statuses] = await Promise.all([
+      boxScoresForGames(context, week, started, teams),
+      options.includeStatuses ? fetchPlayerStatuses() : Promise.resolve([])
+    ]);
+    return { games, stats, statuses };
+  }
+
   return {
     name,
     describe,
@@ -804,6 +894,7 @@ export function createTank01Provider(options: Tank01Options): SportsDataProvider
     fetchPlayers,
     fetchProjections,
     fetchBoxScores,
+    fetchLiveWeek,
     fetchSchedules
   };
 }
