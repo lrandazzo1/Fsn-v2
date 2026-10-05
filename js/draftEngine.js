@@ -81,6 +81,40 @@ export function snakePickNumber(round, teamId, totalTeams, draftType = 'snake') 
   return (round - 1) * totalTeams + pickInRound;
 }
 
+/**
+ * `pick_number -> team_id` from a league's draft pick ledger, in the shape
+ * `fsnv2_draft_order` returns it (`{"27": 4}`), a Map, or the ledger rows
+ * themselves.
+ *
+ * Returns null for an empty or unusable order, which is how every caller tells
+ * "no pick has been traded" from "the snake formula is still the whole truth
+ * here" — the same posture `setLockSchedule()` takes with a week the sync has
+ * not stored. Nothing is invented behind it.
+ *
+ * @param {Record<string, number>|Map<number, number>|Array<Record<string, any>>|null} order
+ * @returns {Map<number, number>|null}
+ */
+export function normalizePickOwners(order) {
+  if (!order) return null;
+
+  const entries = order instanceof Map
+    ? [...order.entries()]
+    : Array.isArray(order)
+      ? order.map((row) => [row.pick_number ?? row.pickNumber,
+                            row.current_team_id ?? row.currentTeamId ?? row.team_id])
+      : Object.entries(order);
+
+  const owners = new Map();
+  entries.forEach(([pick, team]) => {
+    const overall = Number(pick);
+    const teamId = Number(team);
+    if (Number.isInteger(overall) && overall >= 1 && Number.isInteger(teamId) && teamId >= 1) {
+      owners.set(overall, teamId);
+    }
+  });
+  return owners.size > 0 ? owners : null;
+}
+
 const DEFAULTS = {
   teamCount: 12,
   rounds: 15,
@@ -106,6 +140,15 @@ export class DraftEngine {
     this.config = { ...DEFAULTS, ...options };
     /** @type {Map<string, Function[]>} */
     this.listeners = new Map();
+
+    /**
+     * Who owns which pick, when a traded pick has made that something other
+     * than the snake formula. League structure rather than draft state, so
+     * `reset()` and `hydrate()` deliberately leave it alone: a reset re-runs
+     * the draft, it does not undo the trade that moved a pick.
+     * @type {Map<number, number>|null}
+     */
+    this.pickOwners = normalizePickOwners(this.config.pickOwners);
 
     this.clock = new PickTimer({
       seconds: this.config.timerSeconds,
@@ -229,34 +272,95 @@ export class DraftEngine {
     return this.teams.find((team) => team.id === teamId);
   }
 
+  /**
+   * Installs the draft order from the ledger — `state.pick_order` out of
+   * `fsnv2_draft_state`, which is the same map `fsnv2_record_pick` will
+   * enforce. Call it *before* hydrating, so the replay assigns each pick to
+   * the team the database thinks owns it.
+   *
+   * @param {Record<string, number>|Map<number, number>|Array<Record<string, any>>|null} order
+   * @returns {number} how many picks the order covers (0 clears it)
+   */
+  setPickOwners(order) {
+    this.pickOwners = normalizePickOwners(order);
+    this.emit('change', { reason: 'pick-order', picks: this.pickOwners?.size ?? 0 });
+    return this.pickOwners?.size ?? 0;
+  }
+
+  /** True when a traded pick means the board is no longer a plain snake. */
+  get hasTradedPicks() {
+    if (!this.pickOwners) return false;
+    for (const [overall, teamId] of this.pickOwners) {
+      if (teamId !== snakeTeamId(overall, this.teamCount, this.config.draftType)) return true;
+    }
+    return false;
+  }
+
   /** @param {number} overall 1-based overall pick */
   roundForPick(overall) {
     return Math.min(this.rounds, Math.floor((overall - 1) / this.teamCount) + 1);
   }
 
   /**
-   * Snake order: odd rounds run 1..N, even rounds run N..1.
-   * Mirrors public.fsnv2_snake_team() in Postgres.
+   * Who owns this pick: the ledger when a traded pick says otherwise, the
+   * snake formula when it does not.
+   *
+   * Mirrors public.fsnv2_draft_pick_owner() in Postgres, which is what
+   * `fsnv2_record_pick` enforces — so a selection this method allows is one
+   * the database will accept, and the board, the "on the clock" header,
+   * `nextUp()` and every auto-pick path follow a trade without being told
+   * about it separately.
+   *
    * @param {number} overall 1-based overall pick
    * @returns {number} team id
    */
   teamIdForPick(overall) {
-    return snakeTeamId(overall, this.teamCount, this.config.draftType);
+    return this.pickOwners?.get(overall)
+      ?? snakeTeamId(overall, this.teamCount, this.config.draftType);
+  }
+
+  /**
+   * Every pick a team owns in a round, in order.
+   *
+   * Without a ledger this is always exactly one pick — the snake gives each
+   * team one per round — which is why `pickNumberFor` could return a bare
+   * number for the whole of this project's history. A traded pick breaks that:
+   * the team that acquired it has two that round and the team that sent it
+   * has none.
+   *
+   * @returns {number[]}
+   */
+  pickNumbersFor(round, teamId) {
+    if (!this.pickOwners) {
+      return [snakePickNumber(round, teamId, this.teamCount, this.config.draftType)];
+    }
+    const first = (round - 1) * this.teamCount + 1;
+    const owned = [];
+    for (let overall = first; overall < first + this.teamCount; overall += 1) {
+      if (this.teamIdForPick(overall) === teamId) owned.push(overall);
+    }
+    return owned;
   }
 
   /**
    * Inverse of `teamIdForPick`: the overall pick a team owns in a round.
    * This is what the board matrix uses, so every cell sits in its own team's
    * column — round 2 puts pick 13 under team 12 and pick 24 under team 1.
+   *
+   * **null** when the team owns no pick in that round, which only happens once
+   * it has traded one away. Callers that draw a cell per team per round have to
+   * handle that; `pickNumbersFor` gives them the rest.
+   *
+   * @returns {number|null}
    */
   pickNumberFor(round, teamId) {
-    return snakePickNumber(round, teamId, this.teamCount, this.config.draftType);
+    return this.pickNumbersFor(round, teamId)[0] ?? null;
   }
 
   /** The Pick a team made in a given round, if it has been made yet. */
   pickForTeam(round, teamId) {
-    const overall = this.pickNumberFor(round, teamId);
-    return this.picks.find((pick) => pick.overall === overall);
+    const owned = this.pickNumbersFor(round, teamId);
+    return this.picks.find((pick) => owned.includes(pick.overall));
   }
 
   /**
@@ -669,6 +773,9 @@ export class DraftEngine {
       timerSeconds: this.timerSeconds,
       currentPick: this.currentPick,
       complete: this.complete,
+      // Kept in the mirror so a refresh with no network still draws the board
+      // the trades produced rather than a plain snake.
+      pickOwners: this.pickOwners ? Object.fromEntries(this.pickOwners) : null,
       picks: this.picks.map((pick) => ({
         pick_number: pick.overall,
         round: pick.round,

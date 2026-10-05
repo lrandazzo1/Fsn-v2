@@ -225,14 +225,34 @@ export function renderBoard(engine, ui) {
 
     // One cell per TEAM column: the snake decides which pick number lands
     // there, so round 2 shows pick 13 under team 12 and pick 24 under team 1.
+    //
+    // A traded pick breaks that one-to-one (migration 0015): the team that
+    // acquired it owns two picks in the round and the team that sent it owns
+    // none. The cell still belongs to whoever owns the pick, which is what the
+    // grid is for — so a team with nothing left that round gets an empty cell
+    // saying where its pick went, and a team with two shows the second in the
+    // first one's label rather than the grid growing a column.
     for (let teamId = 1; teamId <= teamCount; teamId += 1) {
-      const overall = engine.pickNumberFor(round, teamId);
+      const owned = engine.pickNumbersFor(round, teamId);
+      const overall = owned[0] ?? null;
       const pick = engine.pickForTeam(round, teamId);
       const cell = boardCell('board-cell', '');
       cell.dataset.teamId = String(teamId);
-      cell.dataset.overall = String(overall);
+      if (overall !== null) cell.dataset.overall = String(overall);
       cell.classList.toggle('is-selected-team', teamId === ui.selectedTeamId);
       cell.classList.toggle('is-user-team', teamId === engine.userTeamId);
+      if (owned.length > 1) {
+        cell.classList.add('is-extra-pick');
+        cell.title = `Owns picks ${owned.join(', ')} this round`;
+      }
+
+      if (overall === null) {
+        cell.classList.add('is-traded-away');
+        cell.title = `${engine.teamById(teamId)?.abbr ?? `Team ${teamId}`} traded its round ${round} pick`;
+        cell.innerHTML = '<span class="board-cell__meta">—</span>';
+        frag.appendChild(cell);
+        continue;
+      }
 
       if (pick) {
         const player = engine.playersById[pick.playerId];

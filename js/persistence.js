@@ -119,6 +119,19 @@ export class DraftRepository {
     });
     this.draftId = draftRow.id;
 
+    // The season's pick slots, so a pick can be traded at all (migration 0015).
+    // Seeded from the league's own snake order, so nothing in the draft room
+    // behaves differently until a trade actually moves one — and non-fatal: a
+    // league that cannot write a ledger still drafts, it just cannot trade
+    // picks until the migration is applied.
+    await this.rpc('fsnv2_seed_draft_picks', {
+      p_league_id: this.leagueId,
+      p_season: null,
+      p_rounds: league.rounds
+    }).catch((error) => {
+      console.warn('Draft pick ledger not seeded:', error.message);
+    });
+
     this.writeIds({ leagueId: this.leagueId, draftId: this.draftId });
     this.setStatus('idle');
     return { leagueId: this.leagueId, draftId: this.draftId, state: null, created: true };
@@ -194,6 +207,40 @@ export class DraftRepository {
 
   leagues() {
     return this.rpc('fsnv2_leagues', {});
+  }
+
+  /* ------------------------------------------------------- draft pick ledger */
+
+  /**
+   * Who owns which pick of a season — `{"27": 4}`, and `{}` for a league whose
+   * ledger has never been seeded. `fsnv2_draft_state` already returns this as
+   * `pick_order`, so this is for refreshing the order on its own after a trade
+   * rather than for the boot hydrate.
+   */
+  draftOrder(season = null) {
+    return this.rpc('fsnv2_draft_order', { p_league_id: this.leagueId, p_season: season });
+  }
+
+  /** The ledger behind that order: one row per pick, with labels and owners. */
+  draftPickLedger(season = null, teamId = null) {
+    return this.rpc('fsnv2_draft_pick_ledger', {
+      p_league_id: this.leagueId,
+      p_season: season,
+      p_team_id: teamId
+    });
+  }
+
+  /**
+   * Creates the season's pick slots if they are not there yet. Idempotent, and
+   * it never touches a pick that has already changed hands — so calling it
+   * again after a trade adds any missing rounds and leaves the trades alone.
+   */
+  seedDraftPicks(season = null, rounds = null) {
+    return this.rpc('fsnv2_seed_draft_picks', {
+      p_league_id: this.leagueId,
+      p_season: season,
+      p_rounds: rounds
+    });
   }
 
   players(limit = 1000) {

@@ -29,7 +29,12 @@ import assert from 'node:assert/strict';
 import {
   ROSTER_SLOTS,
   TRADE_STATUSES,
+  draftPickLabel,
+  draftPickSlug,
+  findDraftPick,
   lockedTradePlayers,
+  parseDraftPickRef,
+  tradeDraftPickRefs,
   normalizeBid,
   normalizeTradeItems,
   resolveWaiverBoard,
@@ -337,6 +342,131 @@ test('a third party cannot be made to send something', () => {
   assert.match(errors.join(' '), /not in this trade/);
 });
 
+section('draft picks');
+
+/** Bravo's 2027 second, after Alpha acquired it. */
+const LEDGER = [
+  { pick_id: 'aa000000-0000-4000-8000-000000000001', season: 2027, round: 1,
+    original_team_id: 1, current_team_id: 1, used: false },
+  { pick_id: 'aa000000-0000-4000-8000-000000000002', season: 2027, round: 2,
+    original_team_id: 2, current_team_id: 1, used: false },
+  { pick_id: 'aa000000-0000-4000-8000-000000000003', season: 2027, round: 2,
+    original_team_id: 3, current_team_id: 3, used: true }
+];
+const TEAM_NAMES = { 1: 'Alpha', 2: 'Bravo', 3: 'Charlie', 4: 'Delta' };
+
+test('every spelling the database accepts reads here too', () => {
+  assert.deepEqual(parseDraftPickRef('2027-R2'),
+    { pickId: null, season: 2027, round: 2, originalTeamId: null });
+  assert.deepEqual(parseDraftPickRef('2027-R2-T4'),
+    { pickId: null, season: 2027, round: 2, originalTeamId: 4 });
+  assert.deepEqual(parseDraftPickRef('2027 Round 2 Team 4'),
+    { pickId: null, season: 2027, round: 2, originalTeamId: 4 });
+  assert.equal(parseDraftPickRef('aa000000-0000-4000-8000-000000000002').pickId,
+    'aa000000-0000-4000-8000-000000000002');
+});
+
+test('and anything else is refused rather than guessed at', () => {
+  assert.equal(parseDraftPickRef('next year\u2019s 2nd'), null);
+  assert.equal(parseDraftPickRef('R2'), null);
+  assert.equal(parseDraftPickRef(''), null);
+  assert.equal(parseDraftPickRef(null), null);
+});
+
+test('a pick that has changed hands says whose it was', () => {
+  assert.equal(draftPickLabel(LEDGER[0], TEAM_NAMES), '2027 Round 1');
+  assert.equal(draftPickLabel(LEDGER[1], TEAM_NAMES), '2027 Round 2 (from Bravo)');
+  assert.equal(draftPickSlug(2027, 2, 2), '2027-R2-T2');
+});
+
+test('a bare label resolves against the sending team', () => {
+  // Alpha sending '2027-R2' means Alpha's own second, not the one it acquired.
+  assert.equal(findDraftPick('2027-R2', LEDGER, 1), null,
+    'Alpha has no 2027 second of its own in this ledger');
+  assert.equal(findDraftPick('2027-R2', LEDGER, 2), LEDGER[1],
+    'Bravo\u2019s own second is the one the label names');
+  assert.equal(findDraftPick('2027-R2-T2', LEDGER, 4), LEDGER[1],
+    'and naming the team works from either side');
+});
+
+test('the refs a trade would move come back in order', () => {
+  assert.deepEqual(
+    tradeDraftPickRefs([
+      { senderTeamId: 1, assetType: 'PLAYER', assetId: 'h-08' },
+      { senderTeamId: 1, assetType: 'DRAFT_PICK', assetId: '2027-R2-T2' },
+      { senderTeamId: 2, assetType: 'DRAFT_PICK', assetId: '2027-R1' }
+    ]),
+    ['2027-R2-T2', '2027-R1']
+  );
+});
+
+test('an unreadable pick never leaves the client', () => {
+  assert.throws(
+    () => normalizeTradeItems([{ senderTeamId: 1, assetType: 'DRAFT_PICK', assetId: 'next year' }]),
+    /cannot read "next year" as a draft pick/
+  );
+});
+
+test('trading a pick you hold is legal, and costs no roster space', () => {
+  const { ok, errors } = validateTradeProposal({
+    items: [{ senderTeamId: 1, assetType: 'DRAFT_PICK', assetId: '2027-R2-T2' }],
+    proposerTeamId: 1,
+    recipientTeamId: 4,
+    rosterSizes: { 1: 15, 4: 15 },
+    ledger: LEDGER,
+    teamNames: TEAM_NAMES
+  });
+  assert.equal(ok, true, errors.join('; '));
+});
+
+test('trading one you do not hold is not', () => {
+  const { ok, errors } = validateTradeProposal({
+    items: [{ senderTeamId: 2, assetType: 'DRAFT_PICK', assetId: '2027-R2' }],
+    proposerTeamId: 2,
+    recipientTeamId: 4,
+    rosterSizes: { 2: 3, 4: 3 },
+    ledger: LEDGER,
+    teamNames: TEAM_NAMES
+  });
+  assert.equal(ok, false);
+  assert.match(errors.join(' '), /2027 Round 2 \(from Bravo\) is not team 2's pick to trade/);
+});
+
+test('nor is one that has already been used', () => {
+  const { ok, errors } = validateTradeProposal({
+    items: [{ senderTeamId: 3, assetType: 'DRAFT_PICK', assetId: '2027-R2-T3' }],
+    proposerTeamId: 3,
+    recipientTeamId: 4,
+    rosterSizes: { 3: 3, 4: 3 },
+    ledger: LEDGER,
+    teamNames: TEAM_NAMES
+  });
+  assert.equal(ok, false);
+  assert.match(errors.join(' '), /has already been used/);
+});
+
+test('nor one no season has', () => {
+  const { ok, errors } = validateTradeProposal({
+    items: [{ senderTeamId: 1, assetType: 'DRAFT_PICK', assetId: '2031-R9' }],
+    proposerTeamId: 1,
+    recipientTeamId: 4,
+    rosterSizes: { 1: 3, 4: 3 },
+    ledger: LEDGER
+  });
+  assert.equal(ok, false);
+  assert.match(errors.join(' '), /no such pick in this league's ledger/);
+});
+
+test('without a ledger the shape is checked and ownership is left to the database', () => {
+  const { ok } = validateTradeProposal({
+    items: [{ senderTeamId: 2, assetType: 'DRAFT_PICK', assetId: '2027-R2' }],
+    proposerTeamId: 2,
+    recipientTeamId: 4,
+    rosterSizes: { 2: 3, 4: 3 }
+  });
+  assert.equal(ok, true, 'the engine is the one that can refuse it authoritatively');
+});
+
 section('the lock, over a whole trade');
 
 const LIVE_TRADE = [
@@ -614,6 +744,53 @@ await asyncTest('a malformed item is a 400, not a constraint violation', async (
   assert.equal(res.statusCode, 400);
   assert.match(res.body.error, /item 1 is a PLAYER with no asset id/);
   assert.deepEqual(calls, []);
+});
+
+await asyncTest('a draft pick is sent as the label, for the engine to resolve', async () => {
+  let sent = null;
+  const { res } = await call(
+    proposeHandler,
+    {
+      method: 'POST',
+      body: {
+        ...OFFER,
+        items: [{ senderTeamId: 1, assetType: 'DRAFT_PICK', assetId: '2027-R2-T2' }]
+      }
+    },
+    {
+      fsnv2_propose_trade: (body) => {
+        sent = body;
+        return ok({ trade_id: TRADE, status: 'PENDING' });
+      }
+    }
+  );
+  assert.equal(res.statusCode, 201);
+  assert.deepEqual(sent.p_items, [
+    { sender_team_id: 1, asset_type: 'DRAFT_PICK', asset_id: '2027-R2-T2', amount: null }
+  ]);
+});
+
+await asyncTest('an unreadable pick is a 400 before the database sees it', async () => {
+  const { res, calls } = await call(proposeHandler, {
+    method: 'POST',
+    body: { ...OFFER, items: [{ senderTeamId: 1, assetType: 'DRAFT_PICK', assetId: 'next year' }] }
+  });
+  assert.equal(res.statusCode, 400);
+  assert.match(res.body.error, /cannot read "next year" as a draft pick/);
+  assert.deepEqual(calls, []);
+});
+
+await asyncTest('a pick the engine refuses comes back as a 409 in its words', async () => {
+  const { res } = await call(
+    proposeHandler,
+    {
+      method: 'POST',
+      body: { ...OFFER, items: [{ senderTeamId: 1, assetType: 'DRAFT_PICK', assetId: '2027-R2' }] }
+    },
+    { fsnv2_propose_trade: refused('2027 Round 2 is not Alpha\u2019s pick to trade') }
+  );
+  assert.equal(res.statusCode, 409);
+  assert.match(res.body.error, /not Alpha\u2019s pick to trade/);
 });
 
 await asyncTest('a sender outside the trade is a 400', async () => {

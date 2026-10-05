@@ -251,6 +251,108 @@ function bidRef(bid) {
   };
 }
 
+/* ----------------------------------------------------------- draft picks -- */
+
+/**
+ * A draft pick as the ledger knows it.
+ *
+ * @typedef {Object} DraftPickAsset
+ * @property {string} pickId        the ledger row's id — what a trade item stores
+ * @property {number} season
+ * @property {number} round
+ * @property {number} originalTeamId  whose pick it was, which never changes
+ * @property {number} currentTeamId   whose it is now
+ * @property {boolean} used           already spent on a selection
+ */
+
+/** `2027-R2-T4` — the short form `fsnv2.resolve_draft_pick` reads back. */
+export function draftPickSlug(season, round, originalTeamId) {
+  return `${season}-R${round}-T${originalTeamId}`;
+}
+
+/**
+ * The label a person reads. A pick that has changed hands says whose it was,
+ * because "Charlie's 2027 second" is how a trade is actually discussed — and
+ * because two teams can otherwise send what looks like the same pick.
+ *
+ * Mirrors `fsnv2.draft_pick_label`.
+ *
+ * @param {Record<string, any>} asset a ledger row, either spelling
+ * @param {Record<number, string>} [teamNames] team id -> franchise name
+ */
+export function draftPickLabel(asset, teamNames = {}) {
+  if (!asset) return '';
+  const season = pick(asset, 'season');
+  const round = pick(asset, 'round');
+  const original = num(pick(asset, 'originalTeamId', 'original_team_id'), 0);
+  const current = num(pick(asset, 'currentTeamId', 'current_team_id'), original);
+  const base = `${season} Round ${round}`;
+  if (original === current) return base;
+  return `${base} (from ${teamNames[original] ?? `Team ${original}`})`;
+}
+
+/**
+ * Reads the spellings `fsnv2.resolve_draft_pick` accepts: a ledger uuid,
+ * `2027-R2` (the sender's own pick that round) or `2027-R2-T4`.
+ *
+ * Returns `{ pickId }` for a uuid, `{ season, round, originalTeamId }` for a
+ * label — `originalTeamId` null when the label did not name one, which the
+ * database resolves against the sending team. Returns null for anything it
+ * cannot read, so a proposal form can say so before the request goes out.
+ *
+ * @param {unknown} value
+ */
+export function parseDraftPickRef(value) {
+  if (typeof value !== 'string' || value.trim() === '') return null;
+  const raw = value.trim();
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw)) {
+    return { pickId: raw, season: null, round: null, originalTeamId: null };
+  }
+  const match = /^(\d{4})[\s_-]*R(?:ound)?[\s_-]*(\d{1,2})(?:[\s_-]*T(?:eam)?[\s_-]*(\d{1,2}))?$/i
+    .exec(raw);
+  if (!match) return null;
+  return {
+    pickId: null,
+    season: Number.parseInt(match[1], 10),
+    round: Number.parseInt(match[2], 10),
+    originalTeamId: match[3] === undefined ? null : Number.parseInt(match[3], 10)
+  };
+}
+
+/** The pick refs a trade would move, in the order they appear. */
+export function tradeDraftPickRefs(items) {
+  return (Array.isArray(items) ? items : [])
+    .filter((item) => String(pick(item, 'assetType', 'asset_type') ?? '').toUpperCase() === 'DRAFT_PICK')
+    .map((item) => pick(item, 'assetId', 'asset_id'))
+    .filter((id) => typeof id === 'string' && id !== '');
+}
+
+/**
+ * Finds a ledger row for one of those refs. The sending team resolves a label
+ * with no team in it, the same way the database does.
+ *
+ * @param {string} ref
+ * @param {Array<Record<string, any>>} ledger rows from `fsnv2_draft_pick_ledger`
+ * @param {number} senderTeamId
+ */
+export function findDraftPick(ref, ledger, senderTeamId) {
+  const parsed = parseDraftPickRef(ref);
+  if (!parsed) return null;
+  const rows = Array.isArray(ledger) ? ledger : [];
+  if (parsed.pickId) {
+    return rows.find((row) => pick(row, 'pickId', 'pick_id') === parsed.pickId) ?? null;
+  }
+  const team = parsed.originalTeamId ?? senderTeamId;
+  return (
+    rows.find(
+      (row) =>
+        num(pick(row, 'season')) === parsed.season &&
+        num(pick(row, 'round')) === parsed.round &&
+        num(pick(row, 'originalTeamId', 'original_team_id')) === team
+    ) ?? null
+  );
+}
+
 /* ---------------------------------------------------------------- the trade */
 
 /**
@@ -302,6 +404,13 @@ export function normalizeTradeItems(items) {
     if (assetType === 'FAAB' && !(Number.isFinite(amount) && amount > 0)) {
       throw new TypeError(`${label} sends FAAB but no positive amount.`);
     }
+    // A pick reference the database cannot read is a 400, not a 409: the
+    // request is malformed, and the spellings are worth saying out loud.
+    if (assetType === 'DRAFT_PICK' && !parseDraftPickRef(assetId)) {
+      throw new TypeError(
+        `${label}: cannot read "${assetId}" as a draft pick — use the ledger id, or 2027-R2 (your own) or 2027-R2-T4.`
+      );
+    }
 
     return {
       sender_team_id: senderTeamId,
@@ -323,11 +432,17 @@ export function tradePlayerIds(items) {
 /**
  * Is this trade legal, before anyone is asked to accept it?
  *
- * The same four questions `fsnv2.assert_trade_valid` asks: does every sender
- * belong to the trade, does each own what they are sending, can both rosters
- * hold what they are receiving, and can each cover the FAAB it is sending.
- * Returns the reasons rather than throwing, because a proposal form wants to
- * show all of them at once.
+ * The same questions `fsnv2.assert_trade_valid` asks: does every sender belong
+ * to the trade, does each own what they are sending — players and draft picks
+ * alike — can both rosters hold what they are receiving, and can each cover
+ * the FAAB it is sending. Returns the reasons rather than throwing, because a
+ * proposal form wants to show all of them at once.
+ *
+ * A draft pick costs no roster space: it is not a player yet, so the
+ * roster-space arithmetic below ignores `DRAFT_PICK` items, exactly as the SQL
+ * does. Pass `ledger` (the rows from `fsnv2_draft_pick_ledger`) to have picks
+ * checked at all; without it they are left to the database, which is the one
+ * that can refuse them authoritatively anyway.
  *
  * @param {Object} input
  * @param {Array<Record<string, any>>} input.items
@@ -337,6 +452,8 @@ export function tradePlayerIds(items) {
  * @param {Record<number, number>} input.rosterSizes
  * @param {Record<number, number>} [input.budgets]
  * @param {number} [input.capacity]
+ * @param {Array<Record<string, any>>} [input.ledger] rows from fsnv2_draft_pick_ledger
+ * @param {Record<number, string>} [input.teamNames]
  * @returns {{ok: boolean, errors: string[]}}
  */
 export function validateTradeProposal({
@@ -346,7 +463,9 @@ export function validateTradeProposal({
   ownedBy = {},
   rosterSizes = {},
   budgets = {},
-  capacity = 15
+  capacity = 15,
+  ledger = null,
+  teamNames = {}
 } = {}) {
   const errors = [];
   if (proposerTeamId === recipientTeamId) errors.push('A team cannot trade with itself.');
@@ -365,6 +484,24 @@ export function validateTradeProposal({
     }
     if (item.asset_type === 'PLAYER' && ownedBy[item.asset_id] !== item.sender_team_id) {
       errors.push(`${item.asset_id} is not on team ${item.sender_team_id}'s roster.`);
+    }
+    if (item.asset_type === 'DRAFT_PICK') {
+      if (!parseDraftPickRef(item.asset_id)) {
+        errors.push(
+          `Item ${index + 1}: cannot read "${item.asset_id}" as a draft pick — use 2027-R2 or 2027-R2-T4.`
+        );
+      } else if (ledger) {
+        const asset = findDraftPick(item.asset_id, ledger, item.sender_team_id);
+        if (!asset) {
+          errors.push(`Item ${index + 1}: no such pick in this league's ledger.`);
+        } else if (num(pick(asset, 'currentTeamId', 'current_team_id')) !== item.sender_team_id) {
+          errors.push(
+            `${draftPickLabel(asset, teamNames)} is not team ${item.sender_team_id}'s pick to trade.`
+          );
+        } else if (pick(asset, 'used') === true) {
+          errors.push(`${draftPickLabel(asset, teamNames)} has already been used.`);
+        }
+      }
     }
   });
 

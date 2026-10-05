@@ -613,8 +613,7 @@ begin
   v_id := (public.fsnv2_propose_trade(pg_temp.league(), 1, 2, jsonb_build_array(
     jsonb_build_object('sender_team_id', 1, 'asset_type', 'PLAYER', 'asset_id', 'h-08'),
     jsonb_build_object('sender_team_id', 2, 'asset_type', 'PLAYER', 'asset_id', 'h-07'),
-    jsonb_build_object('sender_team_id', 2, 'asset_type', 'FAAB',   'amount', 15),
-    jsonb_build_object('sender_team_id', 1, 'asset_type', 'DRAFT_PICK', 'asset_id', '2027-R2')))
+    jsonb_build_object('sender_team_id', 2, 'asset_type', 'FAAB',   'amount', 15)))
     ->> 'trade_id')::uuid;
 
   begin
@@ -643,9 +642,12 @@ begin
   perform pg_temp.ok('and into the receiver''s',
     (select faab_balance from fsnv2.team_waiver_state
       where league_id = pg_temp.league() and team_id = 1) = 115);
-  perform pg_temp.ok('the draft pick is reported rather than silently dropped',
-    (select bool_or(m ->> 'asset_type' = 'DRAFT_PICK' and m ->> 'note' is not null)
-       from jsonb_array_elements(v_done -> 'moves') m));
+  -- DRAFT_PICK items are migration 0015's: a pick had nowhere to live when
+  -- 0014 was written, so this file does not trade one.
+  -- supabase/tests/0015_draft_pick_ledger.test.sql covers them.
+  perform pg_temp.ok('every asset in the trade is accounted for in the moves',
+    jsonb_array_length(v_done -> 'moves') = 3,
+    jsonb_array_length(v_done -> 'moves')::text);
   perform pg_temp.ok('executing again is a no-op, not a second swap',
     public.fsnv2_execute_trade(v_id, pg_temp.at()) ->> 'status' = 'EXECUTED'
     and (select count(*) from fsnv2.draft_picks

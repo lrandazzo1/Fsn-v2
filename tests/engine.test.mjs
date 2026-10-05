@@ -508,6 +508,135 @@ test('hydrate handles out-of-order rows by sorting on pick_number', () => {
   assert.equal(restored.picks[0].overall, 1);
 });
 
+/* --------------------------------------------------- traded picks (0015) -- */
+
+console.log('\nTraded picks');
+
+/** Bravo's first-rounder (pick 2) goes to Delta, in a four-team league. */
+function tradedEngine() {
+  const engine = newEngine({ teamCount: 4, rounds: 3, userTeamId: 1 });
+  engine.setPickOwners({ 1: 1, 2: 4, 3: 3, 4: 4, 5: 4, 6: 3, 7: 2, 8: 1,
+    9: 1, 10: 2, 11: 3, 12: 4 });
+  return engine;
+}
+
+test('with no ledger the board is still a plain snake', () => {
+  const engine = newEngine({ teamCount: 4, rounds: 3 });
+  assert.equal(engine.pickOwners, null);
+  assert.equal(engine.hasTradedPicks, false);
+  assert.equal(engine.teamIdForPick(2), 2);
+  assert.deepEqual(engine.pickNumbersFor(1, 2), [2]);
+});
+
+test('an order that matches the snake changes nothing', () => {
+  const engine = newEngine({ teamCount: 4, rounds: 3 });
+  engine.setPickOwners({ 1: 1, 2: 2, 3: 3, 4: 4 });
+  assert.equal(engine.hasTradedPicks, false, 'installed, but nothing has moved');
+  assert.equal(engine.teamIdForPick(2), 2);
+});
+
+test('an empty order clears back to the snake', () => {
+  const engine = tradedEngine();
+  assert.equal(engine.setPickOwners({}), 0);
+  assert.equal(engine.pickOwners, null);
+  assert.equal(engine.teamIdForPick(2), 2);
+});
+
+test('a traded pick moves who is on the clock', () => {
+  const engine = tradedEngine();
+  assert.equal(engine.hasTradedPicks, true);
+  assert.equal(engine.teamIdForPick(2), 4, 'the pick Bravo sent away');
+  assert.equal(engine.teamIdForPick(1), 1, 'and nothing else');
+  assert.equal(snakeTeamId(2, 4), 2, 'the formula itself is untouched');
+});
+
+test('the team that acquired it owns two picks that round', () => {
+  const engine = tradedEngine();
+  assert.deepEqual(engine.pickNumbersFor(1, 4), [2, 4]);
+  assert.equal(engine.pickNumberFor(1, 4), 2, 'the first of them fills the board cell');
+});
+
+test('and the team that sent it owns none', () => {
+  const engine = tradedEngine();
+  assert.deepEqual(engine.pickNumbersFor(1, 2), []);
+  assert.equal(engine.pickNumberFor(1, 2), null, 'which is what empties the cell');
+});
+
+test('the board still covers every pick exactly once', () => {
+  const engine = tradedEngine();
+  const cells = [];
+  for (let round = 1; round <= engine.rounds; round += 1) {
+    for (let teamId = 1; teamId <= engine.teamCount; teamId += 1) {
+      cells.push(...engine.pickNumbersFor(round, teamId));
+    }
+  }
+  assert.deepEqual([...cells].sort((a, b) => a - b),
+    Array.from({ length: 12 }, (_, i) => i + 1));
+});
+
+test('nextUp follows the trade', () => {
+  const engine = tradedEngine();
+  assert.deepEqual(engine.nextUp(2).map((row) => row.teamId), [4, 3]);
+});
+
+test('the picks a team has left follow it too', () => {
+  const engine = tradedEngine();
+  assert.deepEqual(engine.upcomingPicksForTeam(4), [2, 4, 5, 12]);
+  assert.deepEqual(engine.upcomingPicksForTeam(2), [7, 10]);
+});
+
+test('a selection is recorded against the team that acquired the pick', () => {
+  const engine = tradedEngine();
+  engine.autoDraftUser = true;
+  engine.autoPick();
+  engine.autoPick();
+  assert.equal(engine.picks[1].overall, 2);
+  assert.equal(engine.picks[1].teamId, 4, 'not Bravo, whose slot it used to be');
+  assert.equal(engine.rosterFor(2).QB, null, 'Bravo got nothing from round 1');
+});
+
+test('the order survives a reset — a reset re-runs the draft, not the trade', () => {
+  const engine = tradedEngine();
+  engine.autoDraftUser = true;
+  engine.autoPick();
+  engine.reset();
+  assert.equal(engine.picks.length, 0);
+  assert.equal(engine.teamIdForPick(2), 4);
+});
+
+test('hydration replays into the traded columns', () => {
+  const engine = tradedEngine();
+  engine.autoDraftUser = true;
+  for (let i = 0; i < 6; i += 1) engine.autoPick();
+  const rows = engine.toJSON().picks;
+
+  const replayed = tradedEngine();
+  assert.equal(replayed.hydrate(rows), 6);
+  assert.deepEqual(replayed.picks.map((p) => p.teamId), rows.map((r) => r.team_id));
+  assert.equal(replayed.picks[1].teamId, 4);
+});
+
+test('the snapshot carries the order, so an offline reload keeps it', () => {
+  const snapshot = tradedEngine().toJSON();
+  assert.equal(snapshot.pickOwners['2'], 4);
+  const restored = newEngine({ teamCount: 4, rounds: 3 });
+  restored.setPickOwners(snapshot.pickOwners);
+  assert.equal(restored.teamIdForPick(2), 4);
+  assert.equal(newEngine({ teamCount: 4, rounds: 3 }).toJSON().pickOwners, null);
+});
+
+test('the ledger rows themselves can be installed directly', () => {
+  const engine = newEngine({ teamCount: 4, rounds: 3 });
+  assert.equal(
+    engine.setPickOwners([
+      { pick_number: 1, current_team_id: 1 },
+      { pick_number: 2, current_team_id: 4 }
+    ]),
+    2
+  );
+  assert.equal(engine.teamIdForPick(2), 4);
+});
+
 /* ------------------------------------------------------------------ report */
 
 const failed = results.filter((r) => !r.ok);

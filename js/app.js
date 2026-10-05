@@ -327,6 +327,13 @@ async function restoreDraft() {
       const { state, created } = await repo.ensureDraft(CONFIG.league, teamsPayload());
       repo.syncPlayers(Object.values(engine.playersById)).catch(() => {});
 
+      // The draft order before the picks: a traded pick (migration 0015)
+      // means the board is no longer a plain snake, and the replay below
+      // assigns each selection to whoever `teamIdForPick` says owns it. Install
+      // it the wrong way round and every pick after the trade lands in the
+      // wrong column. An unseeded league sends `{}`, which clears to the snake.
+      if (state?.pick_order) engine.setPickOwners(state.pick_order);
+
       if (state?.picks?.length) {
         engine.hydrate(state.picks);
         toast(`Restored ${state.picks.length} picks from the database.`, 'success');
@@ -348,6 +355,7 @@ async function restoreDraft() {
   }
 
   if (local?.picks?.length) {
+    if (local.pickOwners) engine.setPickOwners(local.pickOwners);
     engine.hydrate(local.picks);
     toast(`Restored ${local.picks.length} picks from this browser.`, 'info');
   }

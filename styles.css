@@ -401,6 +401,22 @@ kbd {
 .board-cell.pos-k,
 .board-cell.pos-dst { border-left-color: var(--pos-k);   background: rgba(168, 85, 247, 0.10); }
 
+/* Migration 0015: a traded pick breaks one-cell-per-team-per-round. The team
+   that sent its pick away has an empty cell that round; the team that acquired
+   it keeps one cell and names the extra pick in its tooltip. */
+.board-cell.is-traded-away {
+  background: repeating-linear-gradient(
+    135deg, transparent 0 5px, rgba(255, 255, 255, 0.035) 5px 10px);
+  border-left-color: var(--line);
+}
+.board-cell.is-traded-away .board-cell__meta { color: var(--text-dim); }
+.board-cell.is-extra-pick { border-left-color: var(--brand); }
+.board-cell.is-extra-pick .board-cell__meta::after {
+  content: ' +1';
+  color: var(--brand-bright);
+  font-weight: 600;
+}
+
 .board-cell.is-onclock {
   border-color: var(--brand);
   border-left-color: var(--brand);

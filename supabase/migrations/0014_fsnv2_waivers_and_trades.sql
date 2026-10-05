@@ -175,6 +175,10 @@ create index if not exists trades_open_idx on fsnv2.trades (league_id, status)
 --   DRAFT_PICK  asset_id is a label such as '2027-R2'; see the note on
 --               `fsnv2_execute_trade` — there is no pick ledger in this schema
 --               yet, so a pick is recorded and reported, not transferred.
+--               SUPERSEDED by 0015_fsnv2_draft_pick_ledger.sql, which adds
+--               `fsnv2.draft_pick_assets`, stores the ledger row's id in
+--               asset_id, and makes the pick actually change hands. The
+--               paragraph above is what 0014 did; 0015 is what happens now.
 create table if not exists fsnv2.trade_items (
   id             uuid primary key default gen_random_uuid(),
   trade_id       uuid not null references fsnv2.trades(id) on delete cascade,

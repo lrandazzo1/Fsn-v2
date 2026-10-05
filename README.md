@@ -45,7 +45,7 @@ js/draftEngine.js       Snake state machine: pick progression, clock expiry, bot
 js/seasonEngine.js      Round-robin schedule, weekly score engine, W-L / PF / PA standings
 js/nflTeams.js          NFL colours, logo URLs, team-code aliases and the synced weekly slate
 js/gameLock.js          The lineup lock: isPlayerLocked(), kickoff parsing, status aliases
-js/transactions.js      Waiver bid ordering + settlement, trade validation, the trade lock guard
+js/transactions.js      Waiver bid ordering + settlement, trade validation, draft-pick refs, the trade lock guard
 js/lineup.js            Slot selection, the swap, and the rollback when a save is refused
 js/persistence.js       DraftRepository + SeasonRepository — Supabase RPCs, live reads, localStorage mirror
 js/router.js            Hash router for the app shell
@@ -82,15 +82,16 @@ supabase/migrations/    Schema + RPC migrations (0004 adds the sync tables, 0005
                         0008 the saved lineup + swap RPC, 0009-0012 the audit
                         counters, the upsert/sync merge and the assets RPC,
                         0013 the lineup lock, 0014 waivers, trades and the
-                        league event log)
+                        league event log, 0015 the draft pick ledger)
 supabase/tests/         SQL harness for the engines that only exist in Postgres
-tests/engine.test.mjs   41 assertions: snake order, clock expiry, rosters, hydration
+tests/engine.test.mjs   55 assertions: snake order, traded picks, clock expiry, rosters, hydration
 tests/season.test.mjs   51 assertions: schedule, simulation, standings, NFL matchups, hydration
 tests/player-assets.test.mjs  19 assertions: headshot transform, avatar markup, onError cascade
 tests/gamelock.test.mjs 27 assertions: the lock predicate, feed shapes, the swap guard, the route
-tests/transactions.test.mjs 54 assertions: bid ordering and settlement, trade rules, the four routes
+tests/transactions.test.mjs 68 assertions: bid ordering and settlement, trade rules, draft picks, the four routes
 tests/draft-sim.test.mjs Full 15-round simulation + optional database round-trip
 supabase/tests/0014_waivers_and_trades.test.sql  110 assertions against a real database
+supabase/tests/0015_draft_pick_ledger.test.sql   51 assertions: a pick that actually changes hands
 ```
 
 Open-source dependencies load from CDNs — no install step, no bundler: Tailwind
@@ -132,6 +133,12 @@ Team 1 therefore owns picks **1, 24, 25, 48** through round 4; team 12 owns
 clock" header, the board highlight, `nextUp(n)` and every auto-pick path derive
 from the same pair, so all indicators move together on each selection.
 
+That formula is the *default* order, not the only one. Once a league has a draft
+pick ledger (migration `0015`) and a pick has been traded, `teamIdForPick()`
+answers from the ledger instead — see [The draft pick
+ledger](#the-draft-pick-ledger). Because every indicator above already went
+through that one method, a traded pick moves all of them at once.
+
 ### Board matrix
 
 The board grid is keyed by **team column**, not by pick order: for each round
@@ -139,6 +146,13 @@ row, cell *c* holds `pickNumberFor(round, c)`. So round 2 shows pick 13 in
 column 12 and counts down to pick 24 in column 1, and every cell — including
 the "on the clock" highlight and the click target that loads a roster — sits
 under the franchise that actually owns it.
+
+A traded pick breaks the one-cell-per-team-per-round arithmetic rather than the
+principle: the cell still belongs to whoever owns the pick, but a team can own
+two in a round or none. `pickNumbersFor(round, teamId)` returns all of them and
+`pickNumberFor` returns the first, or `null` for a team that traded its pick
+away — whose cell is drawn hatched and empty, while a team holding a second
+gets a `+1` marker.
 
 ## The pick clock
 
@@ -554,8 +568,9 @@ trade is never on the table for the other manager to accept. The check runs in
 the same transaction as the insert, which is why a refused proposal leaves no
 trade behind. `fsnv2.trade_items` carries one row per asset moving one way:
 `PLAYER` (an `asset_id` from `fsnv2.players`), `FAAB` (an `amount`), or
-`DRAFT_PICK` (a label such as `2027-R2` — recorded and reported, not
-transferred, because this schema has no pick ledger to move it in yet).
+`DRAFT_PICK` (a ledger id, or a label such as `2027-R2` that
+`fsnv2_propose_trade` resolves into one — see [The draft pick
+ledger](#the-draft-pick-ledger)).
 
 Accepting moves nobody. That is what leaves room for a commissioner veto window
 and for the deferral below; the swap is a separate, explicit step.
@@ -607,6 +622,90 @@ the write — so a kickoff that lands mid-request cannot slip a locked player
 through. Players are released from both rosters before either acquisition is
 written, so a full roster is never pushed one over the limit halfway through a
 swap.
+
+### The draft pick ledger
+
+Migration `0014` could put a draft pick in a trade in the sense that it could
+*record* one: the item carried a label, the executed trade reported it, and then
+nothing happened, because `fsnv2.draft_picks` is a record of picks **made** and
+nothing in the schema said who owns pick 27 of next year's draft. Migration
+`0015` gives a pick an identity and an owner.
+
+| Column | Meaning |
+| --- | --- |
+| `(league_id, season, round, original_team_id)` | the pick's **identity**, and it never changes |
+| `current_team_id` | who holds it now — the only column a trade writes |
+| `used_by_pick_id` | the selection that spent it, or null |
+
+Identity is what makes "Charlie's 2027 second" still mean Charlie's 2027 second
+after it has been traded twice, which is how a trade is actually discussed and
+how two teams avoid sending what looks like the same pick. So the label follows
+ownership: `2027 Round 2` while Charlie holds it, `2027 Round 2 (from Charlie)`
+once somebody else does.
+
+```bash
+# the season's grid — idempotent, and it never touches a pick that has moved
+select public.fsnv2_seed_draft_picks('8f4c…', 2027, 4);
+select public.fsnv2_draft_pick_ledger('8f4c…', 2027);
+```
+
+`ensureDraft()` seeds the current season when it provisions a draft, so a new
+league can trade a pick without anyone running that by hand. The call is
+non-fatal: a league that cannot write a ledger still drafts, it just cannot
+trade picks. Seeding a draft that is already under way is safe — the slots whose
+selections have been made are stamped with them, so a pick that has already been
+spent cannot be traded. Later seasons are seeded explicitly, which is also how a
+league extends its draft: `fsnv2_seed_draft_picks(league, 2027, 16)` adds the
+new rounds and leaves every ownership change alone, because "we extended the
+draft" and "we lost the ledger" must not be the same operation.
+
+A client may send a pick three ways, and `fsnv2_propose_trade` resolves all of
+them to the ledger row's id before the item is stored: the id itself, `2027-R2`
+(the sender's own pick that round), or `2027-R2-T4` (the pick that was
+originally team 4's). The id is what gets stored, always — a label means "my own
+second next year", and that stops being true the moment the pick is traded on,
+while the id keeps pointing at the same pick for ever. A pick can only be traded
+by the team that currently holds it, and only while nobody has spent it.
+
+**The ledger is the draft order.** A ledger nothing reads would be the same bug
+one level up, so `fsnv2_record_pick` asks
+`fsnv2_draft_pick_owner(draft, pick_number)` who is on the clock, and that
+function falls back to `fsnv2_snake_team` when the league has no ledger for the
+draft's season. That fallback is what keeps every existing league working
+unchanged: until `fsnv2_seed_draft_picks` is called, the snake formula is still
+the whole truth and nothing in the draft room behaves differently.
+
+Once a league is seeded, a traded pick genuinely moves. A selection sent by the
+team that traded the pick away is refused — and told which mistake it made,
+because a client whose formula is right and whose *data* is stale deserves a
+different sentence from one with a real snake-order bug:
+
+```
+pick 2 was traded: it belongs to team 4, not team 2 — reload the draft order
+```
+
+`fsnv2_draft_state` returns `pick_order` (`{"27": 4}`, and `{}` for an unseeded
+league) in the same round trip that already hydrates the board.
+`engine.setPickOwners()` installs it, and because `teamIdForPick()` was already
+the single source of truth for pick ownership in the browser, the board, the "on
+the clock" header, `nextUp()`, `upcomingPicksForTeam()` and every auto-pick path
+follow a trade without being told about it separately. **Install it before
+hydrating:** the replay assigns each selection to whoever `teamIdForPick` says
+owns it, so the wrong order means every pick after the trade lands in the wrong
+column.
+
+One invariant does break, and it is the board grid's. A round no longer holds
+exactly one pick per team: the team that acquired one has two and the team that
+sent it has none. `pickNumbersFor(round, teamId)` returns all of them,
+`pickNumberFor` returns the first or **null**, and the board draws an empty
+hatched cell for a team that traded its pick away and a `+1` marker on a team
+that owns a second.
+
+Consuming a pick is a stamp rather than a delete — `used_by_pick_id` points at
+the `draft_picks` row that spent it — and the foreign key is `on delete set
+null`. That is the release: `fsnv2_undo_pick` and `fsnv2_reset_draft` free the
+slots again by doing exactly what they already did, and neither function needed
+a line changed.
 
 ### The league event log
 
@@ -665,7 +764,7 @@ Applied to the Supabase project **FSN** as `fsnv2_draft_engine_schema`,
 tables and RPCs — apply it before the first sync run. Tables live in a dedicated `fsnv2` schema so they
 never collide with the existing `public.*` tables.
 
-**Apply them in order, all fourteen.** `0006_fsnv2_player_team_refresh.sql` is not
+**Apply them in order, all fifteen.** `0006_fsnv2_player_team_refresh.sql` is not
 optional: without it `fsnv2_upsert_players` still carries its original 0002
 body, and the browser overwrites every synced roster on each page load (see
 [Team affiliations](#team-affiliations) below).
@@ -684,7 +783,16 @@ the league event log (see [Waivers, free agency &
 trades](#waivers-free-agency--trades) above). It depends on `0013` — the trade
 guard and the waiver drop check both call `fsnv2_player_locked` — and it widens
 the `draft_picks.source` check so a roster can be acquired by claim or by trade,
-which is the one statement in it that changes an existing object. Every
+which is the one statement in it that changes an existing object.
+`0015_fsnv2_draft_pick_ledger.sql` finishes the `DRAFT_PICK` half of `0014`:
+it adds `fsnv2.draft_pick_assets`, a `season` column on `fsnv2.drafts`, and
+re-emits four of `0002`'s and `0014`'s functions — `fsnv2_record_pick`,
+`fsnv2_draft_state`, `fsnv2_propose_trade` and `fsnv2_execute_trade` — with the
+ledger wired in, each body kept verbatim apart from the block its comment names,
+the way `0013` can be diffed against `0008`. A league that never calls
+`fsnv2_seed_draft_picks` is unaffected by all of it: with no ledger rows for a
+draft's season, pick ownership falls back to `fsnv2_snake_team` and the draft
+room behaves exactly as it did before. Every
 migration is idempotent, so re-applying one on a project that already has it is
 a no-op.
 
@@ -726,6 +834,14 @@ for f in supabase/migrations/0*.sql; do psql "$DATABASE_URL" -f "$f"; done
 | `fsnv2.trades` | `id`, `league_id`, `proposer_team_id`, `recipient_team_id`, `status`, `expires_at`, `note`, `responded_at`, `executed_at`, `deferred_from_week`, `effective_week`, `status_detail`, `created_at` |
 | `fsnv2.trade_items` | `id`, `trade_id`, `sender_team_id`, `asset_type`, `asset_id`, `amount`, `created_at` |
 | `fsnv2.league_events` | `id`, `league_id`, `event_type`, `subject_type`, `subject_id`, `season`, `week`, `valid_from`, `valid_to`, `recorded_at`, `payload` (jsonb), `dedupe_key`, `dispatch_status`, `dispatch_attempts`, `dispatched_at`, `dispatch_error` |
+| `fsnv2.draft_pick_assets` | `id`, `league_id`, `season`, `round`, `pick_in_round`, `pick_number`, `original_team_id`, `current_team_id`, `used_by_pick_id`, `created_at` |
+
+Migration `0015` adds `season` to `fsnv2.drafts` (back-filled from
+`started_at`/`created_at`, defaulting to the season the clock is in) so a draft
+can be matched to its pick ledger. `draft_pick_assets` carries two unique keys:
+`(league_id, season, pick_number)` is the slot, which makes seeding idempotent,
+and `(league_id, season, round, original_team_id)` is the pick's identity, which
+is what a trade must never rewrite.
 
 Migration `0004` also extends `fsnv2.players` in place with `provider`,
 `external_id`, `nfl_team_external_id`, `jersey`, `status`, `injury`, `bye_week`,
@@ -779,6 +895,9 @@ security-definer RPCs in `public`:
 | `fsnv2_trade(trade)` / `fsnv2_trades(league[, team, status, limit])` / `fsnv2_trade_lock_report(trade[, now])` | reads |
 | `fsnv2_league_feed(league[, since, limit, types])` | the activity log, newest first |
 | `fsnv2_claim_league_events([limit, league])` / `fsnv2_complete_league_event(...)` | the News Desk's intake (service_role only) |
+| `fsnv2_seed_draft_picks(league[, season, rounds, type])` | creates a season's pick slots, idempotent |
+| `fsnv2_draft_pick_ledger(league[, season, team])` / `fsnv2_draft_order(league[, season])` | who owns which pick |
+| `fsnv2_draft_pick_owner(draft, pick_number)` | **the draft order**: the ledger, or the snake formula |
 
 Every `fsnv2_sync_*` function returns
 `{"inserted": n, "updated": n, "skipped": n, "total": n}` and conflicts on a
@@ -794,8 +913,13 @@ a broken board:
 ```
 out of order pick: got 5, draft is on pick 1
 snake order violation: pick 1 belongs to team 1, got 7
+pick 2 was traded: it belongs to team 4, not team 2 — reload the draft order
 duplicate key value violates unique constraint "draft_picks_unique_player"
 ```
+
+The third of those is migration `0015`'s: the team comes from
+`fsnv2_draft_pick_owner`, so a selection from the team that traded the pick away
+is refused and told that its snake maths is fine and its data is stale.
 
 Every selection in the UI is written through this RPC; `js/persistence.js`
 queues writes with retries, keeps a localStorage mirror, and reports status in
@@ -1280,10 +1404,14 @@ npm run test:audit     # the player audit: team canon, matching, change plan (no
 npm run typecheck      # tsc over api, lib and scripts (needs npm install)
 ```
 
-`tests/engine.test.mjs` (41 assertions) covers snake rotation across 15 rounds
+`tests/engine.test.mjs` (55 assertions) covers snake rotation across 15 rounds
 and odd team counts, on-the-clock indexing through the turn, next-up previews,
 clock expiry (ADP pick, clean advance, single fire), full-draft roster legality,
-undo and hydration.
+undo and hydration — and the draft pick ledger's effect on all of it: an
+installed order that matches the snake changing nothing, a traded pick moving
+who is on the clock and who owns which board cell, the replay landing in the
+traded column, and the order surviving a reset, because a reset re-runs the
+draft and not the trade.
 
 `tests/season.test.mjs` (51 assertions) covers the schedule — 84 games, six a
 week, every team once a week, all 66 pairings exactly once across weeks 1-11,
@@ -1341,14 +1469,15 @@ lifts out of the synced schedule, the manager refusing a swap that touches a
 locked player on *either* side while leaving the lineup untouched, and
 `/api/roster/swap` answering 400 without ever reaching the write.
 
-`tests/transactions.test.mjs` (54 assertions) covers the two halves of the
+`tests/transactions.test.mjs` (68 assertions) covers the two halves of the
 transaction engine that can be tested without a database. The rules, in
 `js/transactions.js`: the order a sealed-bid board is walked (money, then the
 rolling waiver list, then the clock), what settling it produces (one winner; a
 second claim checked against what the first one left; a drop that can only be
 spent once; a locked drop refused), what makes a trade legal (ownership, roster
-space on both sides, FAAB on hand, no third-party senders), and which players in
-a trade are frozen. And the four routes: a malformed trade item answered as a
+space on both sides, FAAB on hand, no third-party senders, a pick held by the
+team sending it and not already spent), every spelling of a draft-pick
+reference, and which players in a trade are frozen. And the four routes: a malformed trade item answered as a
 400 naming the item rather than reaching the database as a constraint violation,
 an unauthorised cron call refused before anything is processed, a missing
 migration as a 503 naming the file, a task failing mid-run still reporting what
@@ -1358,13 +1487,14 @@ accepted, held over — rather than as a success or a failure.
 Those cases are deliberately the same cases
 `supabase/tests/0014_waivers_and_trades.test.sql` (110 assertions) puts to a real
 Postgres, because the rules exist in both places and the whole risk is that the
-two drift. That harness needs a database and is not part of `npm test`:
+two drift. The harnesses need a database and are not part of `npm test`:
 
 ```bash
 createdb fsn
 psql -d fsn -c 'create role anon; create role authenticated; create role service_role;'
 for f in supabase/migrations/0*.sql; do psql -v ON_ERROR_STOP=1 -d fsn -f "$f"; done
 psql -v ON_ERROR_STOP=1 -d fsn -f supabase/tests/0014_waivers_and_trades.test.sql
+psql -v ON_ERROR_STOP=1 -d fsn -f supabase/tests/0015_draft_pick_ledger.test.sql
 ```
 
 It builds a four-team league, drafts it, syncs a week in which one game is
@@ -1375,9 +1505,20 @@ rather than re-sorted, a trade executed whole or not at all, a trade whose asset
 moved between the handshake and the swap refused with nothing half-applied, a
 trade with a locked player deferred and then swept up once the week turns, and
 the event log's dedupe key making a retried run file one article's worth of
-facts instead of two. The whole run is one transaction and ends in a rollback,
-so it can be pointed at a scratch copy of a real database without leaving
-anything behind.
+facts instead of two.
+
+`supabase/tests/0015_draft_pick_ledger.test.sql` (51 assertions) does the same
+for the pick ledger: seeding a season's grid from the league's own draft order,
+re-seeding adding the missing round and leaving the trades alone, a bare
+`2027-R2` resolving to the sender's own pick, `current_team_id` moving while the
+pick's identity does not, the same pick being traded on and still naming whose
+it was, a pick you no longer hold or have already spent being refused, the draft
+accepting a selection only from the team that acquired the pick, undo and reset
+freeing the slot through the foreign key alone, and an unseeded league recording
+picks in snake order exactly as `0002` did.
+
+Both runs are one transaction ending in a rollback, so they can be pointed at a
+scratch copy of a real database without leaving anything behind.
 
 `tests/draft-sim.test.mjs` drafts all 180 picks — alternating market bot picks and
 simulated clock expiries — prints the board by round, verifies the order, and
