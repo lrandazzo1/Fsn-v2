@@ -45,6 +45,7 @@ js/draftEngine.js       Snake state machine: pick progression, clock expiry, bot
 js/seasonEngine.js      Round-robin schedule, weekly score engine, W-L / PF / PA standings
 js/nflTeams.js          NFL colours, logo URLs, team-code aliases and the synced weekly slate
 js/gameLock.js          The lineup lock: isPlayerLocked(), kickoff parsing, status aliases
+js/transactions.js      Waiver bid ordering + settlement, trade validation, the trade lock guard
 js/lineup.js            Slot selection, the swap, and the rollback when a save is refused
 js/persistence.js       DraftRepository + SeasonRepository — Supabase RPCs, live reads, localStorage mirror
 js/router.js            Hash router for the app shell
@@ -71,16 +72,25 @@ scripts/test-sync-data.ts  Sync verification CLI (npm run test:sync-data)
 scripts/audit-players.ts   Player audit CLI (npm run audit:players)
 scripts/test-audit-players.ts  Audit verification CLI (npm run test:audit)
 api/roster/swap.js      GET the saved lineup, POST one guarded slot swap
+api/_supabase.js        Shared RPC plumbing for the routes: fetch, retry, cron auth, error mapping
+api/waivers/process.js  The weekly worker: settle the wire, sweep deferred trades, expire offers
+api/trades/propose.js   POST a trade offer, validated against both rosters
+api/trades/respond.js   POST accept / reject / cancel / veto
+api/trades/execute.js   POST the atomic swap, guarded by the lineup lock
 supabase/migrations/    Schema + RPC migrations (0004 adds the sync tables, 0005 the derivations,
                         0006 the team refresh, 0007 player identity + headshots,
                         0008 the saved lineup + swap RPC, 0009-0012 the audit
                         counters, the upsert/sync merge and the assets RPC,
-                        0013 the lineup lock)
+                        0013 the lineup lock, 0014 waivers, trades and the
+                        league event log)
+supabase/tests/         SQL harness for the engines that only exist in Postgres
 tests/engine.test.mjs   41 assertions: snake order, clock expiry, rosters, hydration
 tests/season.test.mjs   51 assertions: schedule, simulation, standings, NFL matchups, hydration
 tests/player-assets.test.mjs  19 assertions: headshot transform, avatar markup, onError cascade
 tests/gamelock.test.mjs 27 assertions: the lock predicate, feed shapes, the swap guard, the route
+tests/transactions.test.mjs 54 assertions: bid ordering and settlement, trade rules, the four routes
 tests/draft-sim.test.mjs Full 15-round simulation + optional database round-trip
+supabase/tests/0014_waivers_and_trades.test.sql  110 assertions against a real database
 ```
 
 Open-source dependencies load from CDNs — no install step, no bundler: Tailwind
@@ -350,7 +360,7 @@ It reads a game in whatever shape it arrives in — Tank01 (`gameTime_epoch`,
 own `fsnv2.nfl_matchups` rows (`kickoff`, `status`) — and a player's team from
 `teamAbv`, `team` or `nflTeam`, so no caller has to pre-map anything.
 
-### One predicate, four layers
+### One predicate, every layer
 
 `js/gameLock.js` is a plain ES module with a `.d.ts` beside it precisely so that
 there is only ever one copy of this logic:
@@ -371,6 +381,18 @@ Cannot move player: Josh Jacobs is locked because their game has already started
 **Both sides of a swap are checked** — the player moving into the lineup and the
 one moving out. Checking only the incoming player is the hole that lets a
 manager bench a Packer at halftime.
+
+Migration `0014` extends the same predicate to the other two ways a roster can
+change, because a lineup is not the only thing a live game freezes:
+
+| Layer | What it does with it |
+| --- | --- |
+| **Waiver processing** (`fsnv2_process_waivers`) | a claim that would drop a player mid-game fails, with this sentence in `result_detail` |
+| **Free agency** (`fsnv2_claim_free_agent`) | refuses an add or a drop touching a live game |
+| **Trades** (`fsnv2_execute_trade`, `js/transactions.js`) | the trade is deferred to next week rather than refused — see [Trades](#trades) |
+
+Dropping a player at halftime is the same exploit as benching them at halftime,
+and trading one is worse.
 
 The database check is not belt-and-braces theatre: it runs in the same
 transaction as the write, so a kickoff that lands between the endpoint's check
@@ -417,6 +439,224 @@ curl -X POST https://<deployment>/api/roster/swap \
 | `409` | The version is stale — another tab moved first |
 | `503` | Migration 0008 or 0013 is not on the project |
 
+## Waivers, free agency & trades
+
+A roster stopped being whatever the draft produced in migration `0014`. Two
+doors open onto it, and both of them end in the same place: a write to
+`fsnv2.draft_picks`, which is this schema's roster of record.
+
+There is no `rosters` table and no `free_agents` table. A team's roster is the
+set of `draft_picks` rows carrying its `team_id`; a free agent is a player no
+row in the league's active draft names. So an acquisition is a synthetic pick
+with `source = 'waiver'`, `'trade'` or `'free_agency'`, numbered above the
+draft's own pick range so it can never collide with one, and a drop is the
+deletion of that row. Keeping one roster of record is the point: a parallel
+table would let `fsnv2_lineup_state`, `fsnv2_simulate_week` and the draft board
+each hold a different opinion about who is on a team, and the first bug would be
+a player starting for two franchises in the same week.
+
+`fsnv2.lineups` is patched in step, not rebuilt — a manager who spent Saturday
+arranging a lineup should not find it re-sorted because they won a kicker on
+waivers. The dropped player's slot is emptied and the new player takes it if the
+position fits, otherwise the first open bench slot. When no slot can legally
+hold them the saved map is deleted and `fsnv2_lineup_state` lays the roster out
+again on the next read, which is the fallback it already implements for a pick
+set that no longer matches.
+
+### The waiver wire
+
+A sealed-bid FAAB auction. Submitting a bid writes a row and nothing else; the
+whole board is settled in one transaction by a scheduled run.
+
+| Step | Where |
+| --- | --- |
+| Bid | `fsnv2_submit_waiver_bid(league, team, player[, drop, amount, priority])` |
+| Withdraw | `fsnv2_cancel_waiver_bid(bid[, team])` |
+| Look | `fsnv2_waiver_board(league)`, `fsnv2_waiver_state(league)`, `fsnv2_free_agents(league[, position, limit, search])` |
+| Settle | `POST /api/waivers/process` -> `fsnv2_process_waivers([league, now])` |
+
+The order is the auction, and it is evaluated **globally within the league**,
+not per player:
+
+```
+bid_amount DESC  ->  waiver_priority ASC  ->  created_at ASC  ->  the team's own bid priority
+```
+
+Grouping by target player and settling each group independently looks equivalent
+and is not. A team's FAAB pays for every claim it wins, and a bid's drop player
+can only be dropped once — so the processor walks one ordered list and re-reads
+the balance and the roster at each step. The second claim a team wins is checked
+against the money the first one already spent, and when a claim is awarded,
+everything that depended on what it consumed is resolved with it:
+
+* every other pending bid on that player -> `FAILED_PLAYER_TAKEN`, naming the winner
+* that team's other pending bids naming the same drop player -> `FAILED_PLAYER_TAKEN`,
+  because the roster spot they counted on has been spent
+
+`status` is the five values the schema allows. The two failures it has no code
+of its own for — a drop player a winning claim already used, and a full roster
+with no drop named — are recorded as `FAILED_PLAYER_TAKEN` with `result_detail`
+carrying the sentence a manager actually reads, so nothing is lost.
+
+The winner's FAAB is deducted, the claimed player joins the roster, the dropped
+player returns to free agency, and the winning team drops to the back of the
+rolling priority list (`fsnv2_reset_waiver_priority(league)` re-seeds that list
+from inverse standings). Budgets and the order live in
+`fsnv2.team_waiver_state`, created on demand, so a league drafted before this
+migration needs no backfill. League rules live in `leagues.waiver_settings`:
+`{ mode, budget, min_bid, tiebreak }`.
+
+**The lock applies on the way out too.** A claim that would drop a player whose
+game has already started is refused, with 0013's wording — dropping a player at
+halftime is the same exploit as benching them at halftime.
+`fsnv2_claim_free_agent(league, team, player[, drop, now])` is the no-auction
+counterpart for a player who has cleared waivers, and it checks the same thing
+before it writes.
+
+```bash
+# the weekly run: the whole wire, every league, in one transaction
+curl -X POST https://<deployment>/api/waivers/process \
+  -H "authorization: Bearer $CRON_SECRET"
+
+# one league, pinned to an instant, waivers only
+curl -X POST https://<deployment>/api/waivers/process \
+  -H "authorization: Bearer $CRON_SECRET" -H 'content-type: application/json' \
+  -d '{ "leagueId": "8f4c…", "now": "2026-09-30T10:00:00Z", "tasks": ["waivers"] }'
+
+# the board, in the order processing will walk it — settles nothing
+curl "https://<deployment>/api/waivers/process?preview=1&leagueId=8f4c…" \
+  -H "authorization: Bearer $CRON_SECRET"
+```
+
+Three jobs run on that one schedule (`17 10 * * 3` — Wednesday morning), because
+all three are "the league caught up with the calendar": `waivers` settles the
+bids, `trades` executes the trades that were deferred because a player was
+mid-game when they were agreed, and `expiry` withdraws the offers nobody
+answered. They run in that order, whatever order they were asked for, so a
+player claimed this morning can be traded in the same run rather than next week.
+Each is its own transaction; if one fails the response reports which, and what
+had already committed.
+
+### Trades
+
+Three steps, three routes, because they are three different decisions.
+
+| Route | RPC | What it does |
+| --- | --- | --- |
+| `POST /api/trades/propose` | `fsnv2_propose_trade` | 201 with the offer. Nothing moves |
+| `POST /api/trades/respond` | `fsnv2_respond_trade` | ACCEPT / REJECT / CANCEL / VETO |
+| `POST /api/trades/execute` | `fsnv2_execute_trade` | the atomic swap |
+
+A proposal is checked against both rosters before it is inserted — every player
+is owned by the team sending them, both sides can field the roster the trade
+leaves them with, and each can cover the FAAB it is sending — so an impossible
+trade is never on the table for the other manager to accept. The check runs in
+the same transaction as the insert, which is why a refused proposal leaves no
+trade behind. `fsnv2.trade_items` carries one row per asset moving one way:
+`PLAYER` (an `asset_id` from `fsnv2.players`), `FAAB` (an `amount`), or
+`DRAFT_PICK` (a label such as `2027-R2` — recorded and reported, not
+transferred, because this schema has no pick ledger to move it in yet).
+
+Accepting moves nobody. That is what leaves room for a commissioner veto window
+and for the deferral below; the swap is a separate, explicit step.
+
+```bash
+curl -X POST https://<deployment>/api/trades/propose \
+  -H 'content-type: application/json' \
+  -d '{ "leagueId": "8f4c…", "proposerTeamId": 1, "recipientTeamId": 2,
+        "items": [
+          { "senderTeamId": 1, "assetType": "PLAYER", "assetId": "p-0007" },
+          { "senderTeamId": 2, "assetType": "PLAYER", "assetId": "p-0031" },
+          { "senderTeamId": 2, "assetType": "FAAB",   "amount": 15 }
+        ] }'
+
+curl -X POST https://<deployment>/api/trades/respond \
+  -H 'content-type: application/json' \
+  -d '{ "tradeId": "7b1e…", "teamId": 2, "action": "ACCEPT" }'
+
+curl -X POST https://<deployment>/api/trades/execute \
+  -H 'content-type: application/json' -d '{ "tradeId": "7b1e…" }'
+```
+
+#### The lock guard, and why a trade waits instead of failing
+
+`fsnv2_execute_trade` re-runs 0013's predicate over **every player in the trade
+payload** before it writes anything. If any of them is in a game that has
+already started the trade is neither executed nor refused: it is marked
+`PENDING_NEXT_WEEK`, `effective_week` is set to the following week, and
+`/api/waivers/process` executes it once the week turns.
+
+Deferring rather than refusing is the deliberate choice. A manager who agreed a
+trade on Sunday afternoon has agreed to it, and telling them "no, start again"
+throws away a deal both sides wanted — while applying it mid-game would hand one
+of them points that were already on the board. Neither is the answer, so the
+trade waits.
+
+| Response | When |
+| --- | --- |
+| `200 { status: "EXECUTED", moves: […] }` | Nobody in the trade is playing; the swap was written |
+| `202 { status: "PENDING_NEXT_WEEK", effective_week, locked_players }` | Someone is mid-game; held over |
+| `409 { error: "…" }` | The engine refused it, in its own words (not accepted, asset has moved, roster full) |
+| `404` | No such trade |
+| `503` | Migration 0013 or 0014 is not on the project |
+
+The guard is checked twice on this path, the way a lineup swap is: once through
+`fsnv2_trade_lock_report`, so the deferral is explainable before anything is
+attempted, and again inside `fsnv2_execute_trade`, in the same transaction as
+the write — so a kickoff that lands mid-request cannot slip a locked player
+through. Players are released from both rosters before either acquisition is
+written, so a full roster is never pushed one over the limit halfway through a
+swap.
+
+### The league event log
+
+Both engines file what they did, in the same transaction that did it, so the
+automated News Desk and Beat Reporter pipelines can write a Waiver Article or a
+Trade Breakdown immediately instead of diffing rosters to work out what changed.
+
+`fsnv2.league_events` is **bitemporal** in the ordinary sense: two independent
+clocks.
+
+| Column | Clock |
+| --- | --- |
+| `valid_from` / `valid_to` | league time — when the fact became true, and when it stopped |
+| `recorded_at` | transaction time — when this system learned it |
+
+The two come apart in exactly the cases the News Desk cares about. A trade
+agreed on Sunday but effective next week is *recorded* now and *valid* later —
+its `TRADE_DEFERRED` row carries next week's `valid_from` and today's
+`recorded_at`, so "agreed today, effective next week" is a fact about the row
+rather than something an article has to infer. One timestamp cannot express
+that, and back-dating to fake it would make "what did the Beat Reporter know on
+Tuesday night?" unanswerable.
+
+Payloads are deliberately denormalised: a Trade Breakdown written three weeks
+later still says *Jonathan Taylor (RB, IND)* even if the player has since been
+cut and signed elsewhere, where a join at render time would quietly rewrite
+history.
+
+| Event | Filed by | Queued for an article? |
+| --- | --- | --- |
+| `WAIVER_PROCESSED` | one per processing run, with every claim and failure | yes |
+| `WAIVER_CLAIM_AWARDED` | one per awarded claim | yes |
+| `WAIVER_CLAIM_FAILED` | one per failed claim | no — `SKIPPED`, for the manager's feed |
+| `TRADE_PROPOSED` / `TRADE_REJECTED` / `TRADE_CANCELLED` / `TRADE_VETOED` | the handshake | no — `SKIPPED` |
+| `TRADE_ACCEPTED` | the handshake | yes |
+| `TRADE_DEFERRED` | a trade held over for a live game | yes |
+| `TRADE_EXECUTED` | the swap | yes |
+
+The pipeline drains it with `fsnv2_claim_league_events([limit, league])`, which
+claims up to `limit` pending rows and hands them over marked `DISPATCHED` in one
+statement (`for update skip locked`, so two workers never write the same article
+twice), and reports back with
+`fsnv2_complete_league_event(event[, ok, error])` — `ok = false` files the error
+and returns the row to the queue. `fsnv2_league_feed(league[, since, limit,
+types])` is the same log as the league's activity tab, newest first.
+
+`dedupe_key` makes a re-emission a no-op, so a retried cron run cannot produce
+two Waiver Articles for one processing run: the first row stands and the second
+call returns its id.
+
 ## Database (Supabase / Postgres)
 
 Applied to the Supabase project **FSN** as `fsnv2_draft_engine_schema`,
@@ -425,7 +665,7 @@ Applied to the Supabase project **FSN** as `fsnv2_draft_engine_schema`,
 tables and RPCs — apply it before the first sync run. Tables live in a dedicated `fsnv2` schema so they
 never collide with the existing `public.*` tables.
 
-**Apply them in order, all thirteen.** `0006_fsnv2_player_team_refresh.sql` is not
+**Apply them in order, all fourteen.** `0006_fsnv2_player_team_refresh.sql` is not
 optional: without it `fsnv2_upsert_players` still carries its original 0002
 body, and the browser overwrites every synced roster on each page load (see
 [Team affiliations](#team-affiliations) below).
@@ -438,7 +678,13 @@ callable as soon as it is applied.
 `0013_fsnv2_lineup_locks.sql` is what stops a swap after kickoff (see
 [Lineup locks](#lineup-locks) below); until it is applied `/api/roster/swap`
 refuses every swap with *"Lineup locks are not set up yet"* rather than writing
-one nothing has checked. Every
+one nothing has checked.
+`0014_fsnv2_waivers_and_trades.sql` adds the waiver wire, the trade engine and
+the league event log (see [Waivers, free agency &
+trades](#waivers-free-agency--trades) above). It depends on `0013` — the trade
+guard and the waiver drop check both call `fsnv2_player_locked` — and it widens
+the `draft_picks.source` check so a roster can be acquired by claim or by trade,
+which is the one statement in it that changes an existing object. Every
 migration is idempotent, so re-applying one on a project that already has it is
 a no-op.
 
@@ -474,6 +720,12 @@ for f in supabase/migrations/0*.sql; do psql "$DATABASE_URL" -f "$f"; done
 | `fsnv2.weekly_stats` | `id`, `provider`, `external_player_id`, `player_id`, `season`, `week`, `game_external_id`, `team`, `opponent`, `fantasy_points`, `stats`, `snap_counts`, `synced_at` |
 | `fsnv2.nfl_matchups` | `id`, `provider`, `external_id`, `season`, `week`, `home_team`, `away_team`, `home_score`, `away_score`, `kickoff`, `status`, `venue` |
 | `fsnv2.sync_runs` | `id`, `task`, `provider`, `season`, `week`, `status`, `fetched`, `written`, `skipped`, `duration_ms`, `error`, `detail`, timestamps |
+| `fsnv2.lineups` | `draft_id`, `team_id`, `roster` (jsonb slot -> player id), `version` |
+| `fsnv2.team_waiver_state` | `league_id`, `team_id`, `faab_balance`, `waiver_priority`, `claims_won`, `updated_at` |
+| `fsnv2.waiver_bids` | `id`, `league_id`, `team_id`, `player_id`, `drop_player_id`, `bid_amount`, `priority`, `status`, `result_detail`, `processed_at`, `created_at` |
+| `fsnv2.trades` | `id`, `league_id`, `proposer_team_id`, `recipient_team_id`, `status`, `expires_at`, `note`, `responded_at`, `executed_at`, `deferred_from_week`, `effective_week`, `status_detail`, `created_at` |
+| `fsnv2.trade_items` | `id`, `trade_id`, `sender_team_id`, `asset_type`, `asset_id`, `amount`, `created_at` |
+| `fsnv2.league_events` | `id`, `league_id`, `event_type`, `subject_type`, `subject_id`, `season`, `week`, `valid_from`, `valid_to`, `recorded_at`, `payload` (jsonb), `dedupe_key`, `dispatch_status`, `dispatch_attempts`, `dispatched_at`, `dispatch_error` |
 
 Migration `0004` also extends `fsnv2.players` in place with `provider`,
 `external_id`, `nfl_team_external_id`, `jersey`, `status`, `injury`, `bye_week`,
@@ -513,6 +765,20 @@ security-definer RPCs in `public`:
 | `fsnv2_log_sync_run(...)` | one audit row per sync attempt |
 | `fsnv2_projections` / `fsnv2_weekly_stats` / `fsnv2_nfl_schedule` / `fsnv2_nfl_teams` | reads for the UI |
 | `fsnv2_sync_status(limit)` | row counts, freshness and the last sync attempts |
+| `fsnv2_current_nfl_week` / `fsnv2_current_nfl_season` / `fsnv2_player_locked` / `fsnv2_locked_players` | the lineup lock, in SQL (mirrors `js/gameLock.js`) |
+| `fsnv2_lineup_state(draft, team)` / `fsnv2_swap_lineup(...)` | read and **write** one lineup, lock-guarded |
+| `fsnv2_free_agents(league[, position, limit, search])` | the unrostered pool |
+| `fsnv2_submit_waiver_bid(...)` / `fsnv2_cancel_waiver_bid(...)` | a manager's own claims |
+| `fsnv2_waiver_board(league)` / `fsnv2_waiver_state(league)` | the board in processing order; FAAB and priority |
+| `fsnv2_process_waivers([league, now])` | **settles the whole wire in one transaction** (service_role only) |
+| `fsnv2_claim_free_agent(...)` | an immediate add/drop, lock-guarded |
+| `fsnv2_reset_waiver_priority(league)` | re-seeds the waiver order from inverse standings |
+| `fsnv2_propose_trade(...)` / `fsnv2_respond_trade(...)` | the offer and the handshake (service_role only) |
+| `fsnv2_execute_trade(trade[, now])` | **the atomic swap**, or the deferral (service_role only) |
+| `fsnv2_process_pending_trades([league, now])` / `fsnv2_expire_trades([league, now])` | the weekly sweeps |
+| `fsnv2_trade(trade)` / `fsnv2_trades(league[, team, status, limit])` / `fsnv2_trade_lock_report(trade[, now])` | reads |
+| `fsnv2_league_feed(league[, since, limit, types])` | the activity log, newest first |
+| `fsnv2_claim_league_events([limit, league])` / `fsnv2_complete_league_event(...)` | the News Desk's intake (service_role only) |
 
 Every `fsnv2_sync_*` function returns
 `{"inserted": n, "updated": n, "skipped": n, "total": n}` and conflicts on a
@@ -1006,6 +1272,8 @@ npm test               # engine, season and player-asset suites, then the full s
 npm run test:engine    # draft engine only
 npm run test:season    # season matchup engine only
 npm run test:assets    # headshot transform and avatar markup only
+npm run test:locks     # the lineup lock only
+npm run test:transactions  # waiver bid ordering and settlement, trade rules, the four routes
 npm run test:db        # also persist the simulation to Supabase and verify
 npm run test:sync-data # the sports-data ingestion layer (no network, no keys)
 npm run test:audit     # the player audit: team canon, matching, change plan (no network, no keys)
@@ -1073,6 +1341,44 @@ lifts out of the synced schedule, the manager refusing a swap that touches a
 locked player on *either* side while leaving the lineup untouched, and
 `/api/roster/swap` answering 400 without ever reaching the write.
 
+`tests/transactions.test.mjs` (54 assertions) covers the two halves of the
+transaction engine that can be tested without a database. The rules, in
+`js/transactions.js`: the order a sealed-bid board is walked (money, then the
+rolling waiver list, then the clock), what settling it produces (one winner; a
+second claim checked against what the first one left; a drop that can only be
+spent once; a locked drop refused), what makes a trade legal (ownership, roster
+space on both sides, FAAB on hand, no third-party senders), and which players in
+a trade are frozen. And the four routes: a malformed trade item answered as a
+400 naming the item rather than reaching the database as a constraint violation,
+an unauthorised cron call refused before anything is processed, a missing
+migration as a 503 naming the file, a task failing mid-run still reporting what
+had committed, and a trade with a player mid-game coming back **202** —
+accepted, held over — rather than as a success or a failure.
+
+Those cases are deliberately the same cases
+`supabase/tests/0014_waivers_and_trades.test.sql` (110 assertions) puts to a real
+Postgres, because the rules exist in both places and the whole risk is that the
+two drift. That harness needs a database and is not part of `npm test`:
+
+```bash
+createdb fsn
+psql -d fsn -c 'create role anon; create role authenticated; create role service_role;'
+for f in supabase/migrations/0*.sql; do psql -v ON_ERROR_STOP=1 -d fsn -f "$f"; done
+psql -v ON_ERROR_STOP=1 -d fsn -f supabase/tests/0014_waivers_and_trades.test.sql
+```
+
+It builds a four-team league, drafts it, syncs a week in which one game is
+already final, and then exercises what only the database can do: FAAB deducted
+and never negative, the rolling priority list left with no gaps, a claim's
+`draft_picks` row numbered above the draft's own range, the lineup patched
+rather than re-sorted, a trade executed whole or not at all, a trade whose asset
+moved between the handshake and the swap refused with nothing half-applied, a
+trade with a locked player deferred and then swept up once the week turns, and
+the event log's dedupe key making a retried run file one article's worth of
+facts instead of two. The whole run is one transaction and ends in a rollback,
+so it can be pointed at a scratch copy of a real database without leaving
+anything behind.
+
 `tests/draft-sim.test.mjs` drafts all 180 picks — alternating market bot picks and
 simulated clock expiries — prints the board by round, verifies the order, and
 writes `tests/out/draft-sim.json`. With `--db` it pushes every pick through
@@ -1085,8 +1391,10 @@ straight into Postgres (the file header has the SQL).
 framework preset, no build command.
 **Vercel CLI:** `npx vercel deploy --prod`.
 
-The app itself is static. `vercel.json` adds the weekly sync cron and
-`api/draft-ranks.js` provides a daily cached slice of Sleeper's player map.
+The app itself is static. `vercel.json` adds the weekly sync cron (`17 9 * * 2`),
+the waiver-processing cron (`17 10 * * 3` — Wednesday morning, after the week's
+games are final), and `api/draft-ranks.js` provides a daily cached slice of
+Sleeper's player map. Both crons authenticate with `CRON_SECRET`.
 The checked-in `js/sleeperRanksSnapshot.js` is an offline fallback; refresh it
 with `npm run sync:draft-ranks`. Sleeper currently leaves the scoring-specific
 `adp_*` fields empty for many players, so the UI labels its `search_rank`

@@ -6,6 +6,10 @@
     {
       "path": "/api/sync",
       "schedule": "17 9 * * 2"
+    },
+    {
+      "path": "/api/waivers/process",
+      "schedule": "17 10 * * 3"
     }
   ],
   "functions": {
@@ -13,6 +17,9 @@
       "maxDuration": 60
     },
     "api/live-matchups.js": {
+      "maxDuration": 60
+    },
+    "api/waivers/process.js": {
       "maxDuration": 60
     }
   }
